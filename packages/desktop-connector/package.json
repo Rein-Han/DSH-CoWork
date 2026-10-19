@@ -1,0 +1,42 @@
+{
+  "name": "dsh-desktop-cowork-connector",
+  "version": "1.0.1",
+  "private": true,
+  "description": "Publishes this DeepSeek Harness Desktop Host's private connection facts for the DSH Desktop Cowork bridge. Publishes facts only: it opens no port, proxies no RPC, starts no model, and reads no account credential store.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "desktop",
+    "cowork"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

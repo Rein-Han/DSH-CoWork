@@ -1,0 +1,8 @@
+# DSH Desktop Cowork — connection publisher bundle.
+#
+# One Host-side entry: it publishes this running Desktop Host's private
+# connection facts under %LOCALAPPDATA%/DSHDesktopCowork/connections/<profileKey>/.
+# It does not listen on a port, proxy RPC, start a model, or take over sessions.
+- insert:
+    - id: desktop-cowork-connector
+      name: 'dsh-desktop-cowork-connector'

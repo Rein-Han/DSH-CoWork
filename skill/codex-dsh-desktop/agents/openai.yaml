@@ -1,0 +1,16 @@
+interface:
+  display_name: "DSH Desktop Cowork"
+  short_description: "Delegate work to the DSH Desktop Host already running on this machine."
+  default_prompt: "Use $codex-dsh-desktop to hand this task to DSH Desktop, supervise it, and accept the result."
+  tools:
+    - dsh_host_status
+    - dsh_find_sessions
+    - dsh_attach_session
+    - dsh_delegate
+    - dsh_followup
+    - dsh_status
+    - dsh_tail
+    - dsh_wait
+    - dsh_cancel
+    - dsh_list
+    - dsh_release_workspace

@@ -1,0 +1,74 @@
+{
+  "name": "dsh-desktop-cowork",
+  "version": "0.1.0-alpha.5",
+  "private": true,
+  "description": "Private local bridge that lets Codex and Claude Code hand tasks to the user's running DeepSeek Harness Desktop over the dsh_desktop MCP server. Derived from Codex-DSH-Orchestrator / dsh-Agentlink.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Rein-Han/DSH-CoWork.git"
+  },
+  "homepage": "https://github.com/Rein-Han/DSH-CoWork",
+  "bugs": {
+    "url": "https://github.com/Rein-Han/DSH-CoWork/issues"
+  },
+  "keywords": [
+    "codex",
+    "claude-code",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "mcp",
+    "agent-link",
+    "agent-harness",
+    "agent-collaboration"
+  ],
+  "type": "module",
+  "files": [
+    "dist/",
+    "docs/",
+    "skill/",
+    "README.md",
+        "CONTRIBUTING.md",
+    "SECURITY.md",
+    "KNOWN_ISSUES.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "bin": {
+    "dsh-desktop-cowork": "dist/index.js",
+    "dsh-cowork-setup-desktop": "dist/setup-desktop.js",
+    "dsh-cowork-doctor": "dist/doctor-desktop-cli.js",
+    "dsh-cowork-verify-desktop": "dist/verify-desktop.js",
+    "dsh-cowork-uninstall-desktop": "dist/uninstall-desktop.js",
+    "dsh-cowork-legacy-doctor": "dist/doctor.js",
+    "dsh-cowork-legacy-setup-codex": "dist/setup-codex.js",
+    "dsh-cowork-legacy-setup-claude": "dist/setup-claude-code.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "node dist/index.js",
+    "setup-desktop": "node dist/setup-desktop.js",
+    "doctor:desktop": "node dist/doctor-desktop-cli.js --desktop",
+    "verify-desktop": "node dist/verify-desktop.js",
+    "uninstall-desktop": "node dist/uninstall-desktop.js",
+    "test": "node scripts/run-tests.mjs",
+    "check": "npm run build && npm test",
+    "prepack": "npm run check"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.5",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "ws": "^8.18.3"
+  }
+}
+

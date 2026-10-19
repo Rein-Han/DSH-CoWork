@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.DS_Store
+coverage/
+*.log
+*.tgz
+.env
+.env.*
+.dsh-bridge/
+/.agents/skills/codex-dsh-orchestrator/
+installer/stage/
+dist-test/
+artifacts/
+# release/ is a local runnable build; only the connector package is tracked.
+# The installer .exe is published separately, not in git.
+release/*
+!release/dsh-desktop-cowork-connector-*.tgz
