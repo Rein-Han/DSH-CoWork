@@ -2,7 +2,7 @@
 /**
  * `setup-desktop` — the single installer entry point for the private build.
  *
- * It registers the `dsh_desktop` MCP server with Codex and/or Claude Code and
+ * It registers the `dsh_desktop` MCP server with Codex, Claude Code, or ZCode and
  * installs the matching caller skill. Only this project's own entries are
  * touched, every changed file is backed up with its hash recorded, a second run
  * is a no-op, and nothing that carries the launch token is ever written into a
@@ -25,12 +25,12 @@ import { fileURLToPath } from "node:url";
 import { atomicInstallText, readConfigSnapshot } from "./setup-engine.js";
 import { inspectDesktopHost } from "./desktop/doctor-desktop.js";
 
-export type Caller = "codex" | "claude" | "both";
+export type Caller = "codex" | "claude" | "zcode" | "both";
 export type Scope = "user" | "project";
 
 export const SERVER_NAME = "dsh_desktop";
 export const LEGACY_SERVER_NAMES = ["dsh_agentlink", "dsh_collab"] as const;
-const SKILL_NAMES = { codex: "codex-dsh-desktop", claude: "claude-dsh-desktop" } as const;
+const SKILL_NAMES = { codex: "codex-dsh-desktop", claude: "claude-dsh-desktop", zcode: "zcode-dsh-desktop" } as const;
 
 export interface SetupOptions {
   caller: Caller;
@@ -45,7 +45,7 @@ export interface SetupOptions {
 }
 
 interface PlannedWrite {
-  caller: "codex" | "claude";
+  caller: "codex" | "claude" | "zcode";
   kind: "mcp-config" | "skill";
   target: string;
   description: string;
@@ -87,8 +87,8 @@ export function parseArgs(argv: readonly string[]): SetupOptions {
     switch (arg) {
       case "--caller": {
         const value = next();
-        if (value !== "codex" && value !== "claude" && value !== "both") {
-          throw new Error(`--caller must be codex, claude, or both, received ${value}`);
+        if (value !== "codex" && value !== "claude" && value !== "zcode" && value !== "both") {
+          throw new Error(`--caller must be codex, claude, zcode, or both, received ${value}`);
         }
         options.caller = value;
         break;
@@ -132,12 +132,12 @@ export function defaultEntry(): string {
 }
 
 /** The non-secret environment every installed server entry receives. */
-export function bridgeEnvironment(connectionFile: string, caller: "codex" | "claude"): Record<string, string> {
+export function bridgeEnvironment(connectionFile: string, caller: "codex" | "claude" | "zcode"): Record<string, string> {
   return {
     DSH_HOST_MODE: "desktop-paired",
     DSH_CONNECTION_FILE: connectionFile,
     DSH_BRIDGE_HOME: join(process.env.LOCALAPPDATA ?? homedir(), "DSHDesktopCowork", "bridge"),
-    DSH_CALLER_KIND: caller === "codex" ? "codex" : "claude-code",
+    DSH_CALLER_KIND: caller === "claude" ? "claude-code" : caller,
     DSH_APPROVAL_MODE: "desktop",
     DSH_MODEL_POLICY: "inherit",
   };
@@ -155,9 +155,17 @@ export function claudeConfigPath(scope: Scope, projectDir: string): string {
   return scope === "project" ? join(projectDir, ".mcp.json") : join(homedir(), ".claude.json");
 }
 
+/** Where ZCode keeps its MCP configuration. */
+export function zcodeConfigPath(scope: Scope, projectDir: string): string {
+  return scope === "project" ? join(projectDir, ".zcode", "config.json") : join(homedir(), ".zcode", "cli", "config.json");
+}
+
 /** Where a caller's skill directory lives for one scope. */
-export function skillTarget(caller: "codex" | "claude", scope: Scope, projectDir: string): string {
+export function skillTarget(caller: "codex" | "claude" | "zcode", scope: Scope, projectDir: string): string {
   const name = SKILL_NAMES[caller];
+  if (caller === "zcode") {
+    return join(scope === "project" ? projectDir : homedir(), ".zcode", "skills", name);
+  }
   if (caller === "codex") {
     return scope === "project" ? join(projectDir, ".agents", "skills", name) : join(homedir(), ".agents", "skills", name);
   }
@@ -236,6 +244,22 @@ export function applyClaudeEntry(content: string | undefined, entry: Record<stri
   return `${JSON.stringify({ ...parsed, mcpServers: table }, null, 2)}\n`;
 }
 
+/** Preserve ZCode settings and sibling servers while updating this server. */
+export function applyZcodeEntry(content: string | undefined, entry: Record<string, unknown> | undefined): string {
+  const object = (value: unknown, label: string): Record<string, unknown> => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`the target ZCode ${label} is not a JSON object`);
+    }
+    return value as Record<string, unknown>;
+  };
+  const parsed = content === undefined || content.trim() === "" ? {} : object(JSON.parse(content), "configuration");
+  const mcp = parsed.mcp === undefined ? {} : object(parsed.mcp, "mcp entry");
+  const servers = { ...(mcp.servers === undefined ? {} : object(mcp.servers, "mcp.servers entry")) };
+  if (entry === undefined) delete servers[SERVER_NAME];
+  else servers[SERVER_NAME] = entry;
+  return `${JSON.stringify({ ...parsed, mcp: { ...mcp, servers } }, null, 2)}\n`;
+}
+
 /** Hash a file's content for the delivery record. */
 export async function fileHash(path: string): Promise<string | undefined> {
   try {
@@ -262,18 +286,19 @@ async function exists(path: string): Promise<boolean> {
  * `dsh_desktop` entry yet - both are a plain, safe upsert. `differs` means the
  * entry already exists with other content, which needs an explicit `--replace`.
  */
-function classifyExisting(caller: "codex" | "claude", before: string | undefined, rendered: string): PlannedWrite["before"] {
+function classifyExisting(caller: "codex" | "claude" | "zcode", before: string | undefined, rendered: string): PlannedWrite["before"] {
   if (before === undefined) return "absent";
   if (before.trimEnd() === rendered.trimEnd()) return "identical";
   return hasOwnEntry(caller, before) ? "differs" : "absent";
 }
 
 /** Whether the file already carries a `dsh_desktop` entry. */
-function hasOwnEntry(caller: "codex" | "claude", content: string): boolean {
+function hasOwnEntry(caller: "codex" | "claude" | "zcode", content: string): boolean {
   if (caller === "codex") return content.includes(CODEX_TABLE_HEADER);
   try {
-    const parsed = JSON.parse(content) as { mcpServers?: Record<string, unknown> };
-    return parsed.mcpServers !== undefined && parsed.mcpServers !== null && SERVER_NAME in parsed.mcpServers;
+    const parsed = JSON.parse(content) as { mcpServers?: Record<string, unknown>; mcp?: { servers?: Record<string, unknown> } };
+    const servers = caller === "zcode" ? parsed.mcp?.servers : parsed.mcpServers;
+    return servers !== undefined && servers !== null && SERVER_NAME in servers;
   } catch {
     return false;
   }
@@ -311,16 +336,19 @@ export async function buildPlan(options: SetupOptions): Promise<PlanReport> {
     );
   }
 
-  const callers: Array<"codex" | "claude"> =
+  const callers: Array<"codex" | "claude" | "zcode"> =
     options.caller === "both" ? ["codex", "claude"] : [options.caller];
   for (const caller of callers) {
     const env = bridgeEnvironment(desktop.connectionFile ?? "<DSH_CONNECTION_FILE>", caller);
-    const configPath = caller === "codex" ? codexConfigPath(options.scope, options.projectDir) : claudeConfigPath(options.scope, options.projectDir);
+    const configPath = caller === "codex"
+      ? codexConfigPath(options.scope, options.projectDir)
+      : caller === "zcode" ? zcodeConfigPath(options.scope, options.projectDir) : claudeConfigPath(options.scope, options.projectDir);
     const before = await readFile(configPath, "utf8").catch(() => undefined);
+    const applyJsonEntry = caller === "zcode" ? applyZcodeEntry : applyClaudeEntry;
     const rendered =
       caller === "codex"
         ? applyCodexTable(before ?? "", options.uninstall ? undefined : renderCodexBlock(nodePath, entryPath, env))
-        : applyClaudeEntry(
+        : applyJsonEntry(
             before,
             options.uninstall
               ? undefined

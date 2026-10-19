@@ -1,8 +1,10 @@
 # DSH-CoWork
 
-让 Codex / Claude Code 把任务交给你电脑上已经打开的 **DeepSeek Harness Desktop**（下文简称 DSH）去做，然后查看进度、拿回结果、自己验收。
+让 ZCode / Codex / Claude Code 把任务交给你电脑上已经打开的 **DeepSeek Harness Desktop**（下文简称 DSH）去做，然后查看进度、拿回结果、自己验收。
 
-你在 Codex 或 Claude Code 里说一句"把这个交给 DSH"，它会在 DSH Desktop 里新建一个会话执行任务。你可以在 DSH Desktop 里看到同一个会话和它的每一步操作，做完后 Codex / Claude 再检查改动和测试。
+`zcode-support` 分支提供 ZCode 接入，使用源码安装。完整步骤见 [ZCode 安装与使用指南](docs/zcode.md)。
+
+在调用方里说一句“把这个交给 DSH”，它会在 DSH Desktop 里新建一个会话执行任务。你可以在 DSH Desktop 里看到同一个会话和它的每一步操作，做完后由调用方检查改动和测试。
 
 > 当前是测试版，只支持 Windows，已在 DeepSeek Harness Desktop 0.2.1-rc.2（Host 协议 4）上实机连通。
 
@@ -11,12 +13,12 @@
 | 部分 | 作用 |
 |---|---|
 | DSH 插件 `dsh-desktop-cowork-connector` | 装进 DSH Desktop。DSH 每次启动时，它把本机端口和登录凭据写到一个只有你本人能读的文件里，不开端口、不代理请求 |
-| MCP 服务 `dsh_desktop` | 由 Codex / Claude 自动启动，读取上面的文件后连接 DSH，提供 `dsh_delegate`、`dsh_wait`、`dsh_followup` 等工具 |
-| skill `codex-dsh-desktop` / `claude-dsh-desktop` | 告诉 Codex / Claude 什么时候用这些工具、怎么交接任务、怎么验收 |
+| MCP 服务 `dsh_desktop` | 由 ZCode / Codex / Claude 自动启动，读取上面的文件后连接 DSH，提供 `dsh_delegate`、`dsh_wait`、`dsh_followup` 等工具 |
+| skill `zcode-dsh-desktop` / `codex-dsh-desktop` / `claude-dsh-desktop` | 告诉调用方什么时候用这些工具、怎么交接任务、怎么验收 |
 
 ## 安装
 
-需要：Windows 10/11 x64，已为当前用户安装 DeepSeek Harness Desktop，以及 Codex 和/或 Claude Code。
+需要：Windows 10/11 x64，已为当前用户安装 DeepSeek Harness Desktop，以及 ZCode、Codex 或 Claude Code。ZCode 请按 [专项指南](docs/zcode.md) 从源码安装。
 
 ### 方式一：安装包（推荐）
 
@@ -67,16 +69,40 @@ npm run build
    npm run verify-desktop -- --project "$env:USERPROFILE\Documents\cowork-acceptance"
    ```
 
+### ZCode 接入
+
+完整步骤见 [ZCode 安装与使用指南](docs/zcode.md)。完成源码构建和 DSH 插件安装后，保持 DSH Desktop 运行，再注册 ZCode：
+
+```powershell
+npm run setup-desktop -- --caller zcode --scope user --dry-run
+npm run setup-desktop -- --caller zcode --scope user --apply
+```
+
+安装器会在 `~/.zcode/cli/config.json` 的 `mcp.servers` 中注册 `dsh_desktop`，并把 `zcode-dsh-desktop` 技能安装到 `~/.zcode/skills/`。配置写入前会生成备份。重新打开 ZCode 会话后，可以说“把这个任务交给 DSH”，或使用 `/zcode-dsh-desktop`。
+
+在当前仓库目录执行以下命令，可以用 ZCode 已注册的 MCP 配置发送一次只读测试消息。测试会在 DSH Desktop 中保留一个会话，并消耗少量模型额度：
+
+```powershell
+node scripts/verify-zcode.mjs
+```
+
+卸载 ZCode 接入配置：
+
+```powershell
+npm run setup-desktop -- --caller zcode --scope user --uninstall --apply
+```
+
 ## 使用
 
-保持 DSH Desktop 处于打开状态，在 Codex / Claude Code 里直接说：
+保持 DSH Desktop 处于打开状态，在 ZCode / Codex / Claude Code 里直接说：
 
 > 把这个任务交给 DSH：修复登录页提交失败的问题，只改登录相关代码和测试。做完你检查改动和测试，再告诉我结果。
 
-- 你的话里提到 DSH 就会自动触发对应的 skill；也可以显式调用：Claude Code 里输入 `/claude-dsh-desktop`，Codex 里输入 `$codex-dsh-desktop`。
+- 可以让调用方使用对应的 skill，也可以显式调用：ZCode 里输入 `/zcode-dsh-desktop`，Claude Code 里输入 `/claude-dsh-desktop`，Codex 里输入 `$codex-dsh-desktop`。
+- 新对话按任务的 `cwd` 归入 DSH Desktop 中对应路径的项目文件夹；已有项目会直接复用，该路径尚未登记为项目时自动登记。
 - 模型和推理强度沿用 DSH Desktop 里的设置，这里不能修改。
-- DSH 需要审批或向你提问时，到 DSH Desktop 里处理，Codex / Claude 不会代你批准。
-- 同一个目录同一时间只允许一个任务写入。任务验收完之后，Codex / Claude 会释放这个目录的占用。
+- DSH 需要审批或向你提问时，到 DSH Desktop 里处理，调用方不会代你批准。
+- 同一个目录同一时间只允许一个任务写入。任务验收完之后，调用方会释放这个目录的占用。
 
 这些本地安装的 skill 不会出现在 Claude 桌面 app 设置里的 Skills / Plugins 页面。那两个页面管的是账号级内容。
 

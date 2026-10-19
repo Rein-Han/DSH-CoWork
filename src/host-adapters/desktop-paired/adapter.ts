@@ -27,6 +27,7 @@ import {
   sessionListResultSchema,
   sessionPageResultSchema,
   sessionProjectionsResultSchema,
+  workspaceCreateResultSchema,
 } from "./protocol.js";
 import type { SessionEvent } from "./protocol.js";
 
@@ -184,9 +185,12 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
     signal?: AbortSignal,
   ): Promise<DshUnaryResult<{ sessionId: string; agentPreset?: string }>> {
     this.requireCapability("createSession", "creating a session");
+    const { workspace } = workspaceCreateResultSchema.parse(
+      await this.callRaw(ENDPOINTS.workspaceCreate, { request: { path: payload.cwd } }, signal),
+    );
     const result = await this.call<{ sessionId: string }>(ENDPOINTS.sessionCreate, {
       request: {
-        cwd: payload.cwd,
+        workspaceId: workspace.workspaceId,
         ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
         ...(payload.agentPreset === undefined ? {} : { agentPreset: payload.agentPreset }),
       },

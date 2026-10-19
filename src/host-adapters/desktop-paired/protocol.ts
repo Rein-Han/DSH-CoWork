@@ -30,6 +30,7 @@ export const API_CHANNEL = "/api";
 
 /** Endpoints this adapter implements, by `namespace/method`. */
 export const ENDPOINTS = {
+  workspaceCreate: "workspace/create",
   sessionList: "session/list",
   sessionCreate: "session/create",
   sessionPrompt: "session/prompt",
@@ -143,6 +144,13 @@ export const sessionListResultSchema = z
         })
         .passthrough(),
     ),
+  })
+  .passthrough();
+
+export const workspaceCreateResultSchema = z
+  .object({
+    workspace: z.object({ workspaceId: z.string().min(1), path: z.string().min(1) }).passthrough(),
+    created: z.boolean(),
   })
   .passthrough();
 

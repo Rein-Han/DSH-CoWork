@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 export type HostMode = "static" | "desktop-auto" | "desktop-paired";
 
 /** Which calling client this bridge process serves. Display and attribution only — never an authorization claim. */
-export type CallerKind = "codex" | "claude-code" | "unknown";
+export type CallerKind = "codex" | "claude-code" | "zcode" | "unknown";
 
 export interface BridgeConfig {
   hostUrl: string;
@@ -94,6 +94,7 @@ function detectTimeZone(): string | undefined {
 function callerKindOf(raw: string | undefined): CallerKind {
   const value = raw?.trim().toLowerCase();
   if (value === "codex") return "codex";
+  if (value === "zcode") return "zcode";
   if (value === "claude-code" || value === "claude") return "claude-code";
   return "unknown";
 }
