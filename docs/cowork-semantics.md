@@ -7,6 +7,13 @@ the canonical page and both copies state the same rules.
 
 ## Roles
 
+P3 adds opt-in long waiting, token-only progress, incremental locked ledger reads
+and task-shared observation polling. The default remains bounded until the exact
+client/version/entry passes native acceptance. See `long-wait.md` in this same
+directory for configuration, rollback, capability limits and acceptance tools.
+The server's `clientLongWaitVerified=false` is not an assertion that long calls
+fail; the server cannot certify a caller UI from its environment.
+
 - **Main agent** (the current Codex or Claude Code session): decomposes the work,
   decides what DSH should do, writes the handoff, supervises, and **accepts the
   result itself**. DSH finishing is not the same as the work being accepted.
@@ -66,14 +73,37 @@ read-only for that task.
 
 Release the claim with `dsh_release_workspace` **after** you have reviewed the
 result. While the session is running, queued, awaiting approval, or awaiting
-input, releasing is refused.
+input, releasing is refused. Desktop release reads a fresh sequenced
+`session/projections.values.inbox` and the first complete `job/list` rows snapshot
+for the root and known descendants. Running/stopping jobs (including visible
+unowned jobs) block release; completed/failed/killed jobs do not. Cached, missing,
+malformed or unavailable evidence returns `workspace_state_unknown` and preserves
+the claim. No synthetic empty baseline or force bypass is used.
+Release rechecks lineage/ledger and compares the claim under the registry lock.
+These reads do not form a Host atomic fence against Desktop UI or other clients.
+The release result identifies its evidence source; normal status queueDepth may
+remain unknown because its mux cache is separate from this on-demand check.
+
+Steer requires an active root turn; a turn change during its preflight returns
+`stale_view` before dispatch. Queue and steer writes are never automatically
+retried. Observation revisions are task-scoped; the public connection revision
+still retains its original write-freshness meaning.
 
 ## Waiting
 
-`dsh_wait` returns within 30 seconds and reports `cursor`, `execution`,
-`availability`, `pendingInteractionSummary`, and `finalResultPointer`. An empty
-window is not a failure. Keep supervising and give the user a short progress
-update; for long work, return control to the user and resume later by `taskId`.
+Delegate with `waitSeconds=0`, retain `waitTarget.targetStartAfterCursor`,
+then explicitly wait with `until=terminal,responseMode=compact,timeoutSec=30`.
+Pass that target on each wait and resume from `nextCursor`.
+The summary reports `execution`, `availability`, `wakeReason`,
+`connectionRevision`, `pendingInteractions`, and `finalMessageStatus`.
+Read complete results using `dsh_status` or `dsh_tail` once they are available.
+Ordinary events remain in the ledger; explicit `change/full` still supports
+phase inspection, steer/cancel and diagnosis. Old omitted options remain change/full.
+Timeouts are normal and do not cancel DSH. Continue existing authorized work;
+no fixed timeout count means completion or permission to abandon supervision.
+Canceling a wait only removes that observer. No waiter means no loss of task events.
+Long mode is opt-in after independent client validation; configuration alone
+does not prove interrupt/concurrency/background support. No notifications are promised.
 
 ## Interactions belong to the Desktop UI
 

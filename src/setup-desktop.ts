@@ -42,6 +42,7 @@ export interface SetupOptions {
   projectDir: string;
   /** Override the entry script; defaults to this package's compiled index.js. */
   entry?: string;
+  waitProfile?: "bounded" | "long";
 }
 
 interface PlannedWrite {
@@ -53,6 +54,7 @@ interface PlannedWrite {
   content?: string;
   /** Files to copy for a skill install. */
   copyFrom?: string;
+  expectedBefore?: string | null;
 }
 
 export interface PlanReport {
@@ -105,6 +107,12 @@ export function parseArgs(argv: readonly string[]): SetupOptions {
       case "--entry":
         options.entry = resolve(next());
         break;
+      case "--wait-profile": {
+        const value = next();
+        if (value !== "bounded" && value !== "long") throw new Error("--wait-profile must be bounded or long");
+        options.waitProfile = value;
+        break;
+      }
       case "--dry-run":
         options.dryRun = true;
         break;
@@ -174,7 +182,7 @@ export function renderCodexBlock(nodePath: string, entry: string, env: Record<st
     `command = ${JSON.stringify(nodePath)}`,
     `args = [${JSON.stringify(entry)}]`,
     "startup_timeout_sec = 60",
-    "tool_timeout_sec = 120",
+    `tool_timeout_sec = ${env.DSH_WAIT_PROFILE === "long" ? 960 : 120}`,
     `env = { ${Object.entries(env).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(", ")} }`,
     "",
   ].join("\n");
@@ -182,6 +190,22 @@ export function renderCodexBlock(nodePath: string, entry: string, env: Record<st
 
 /** The table header this build owns; the whole table is replaced on update. */
 export const CODEX_TABLE_HEADER = `[mcp_servers.${SERVER_NAME}]`;
+
+function mergeInlineEnv(oldValue: string, newValue: string): string {
+  const parse = (value: string) => {
+    const entries = new Map<string, string>();
+    const body = value.trim().replace(/^\{/, "").replace(/\}\s*(?:#.*)?$/, "");
+    const rest = body.replace(/([A-Za-z0-9_]+)\s*=\s*("(?:\\.|[^"\\])*"|'[^']*')/g, (_, key: string, literal: string) => {
+      if (entries.has(key)) throw new Error("duplicate environment key; review configuration manually");
+      entries.set(key, literal); return "";
+    });
+    if (rest.replace(/[,\s]/g, "") !== "") throw new Error("unsupported TOML environment syntax; configuration was not changed");
+    return entries;
+  };
+  const merged = parse(oldValue);
+  for (const [k, v] of parse(newValue)) merged.set(k, v);
+  return `{ ${[...merged].map(([k, v]) => `${k} = ${v}`).join(", ")} }`;
+}
 
 /**
  * Upsert or remove this build's Codex table without touching any other table.
@@ -205,7 +229,29 @@ export function applyCodexTable(content: string, block: string | undefined): str
     const merged = [...head, ...tail].join("\n").replace(/\n{3,}/gu, "\n\n").trimEnd();
     return merged === "" ? "" : `${merged}\n`;
   }
-  const merged = [...head, ...block.replace(/\s+$/u, "").split("\n"), ...tail].join("\n");
+  const existing = lines.slice(start + 1, end);
+  const incoming = block.trimEnd().split("\n").slice(1);
+  // Preserve user-owned settings and env variables, including approval/allowlists.
+  for (const line of incoming) {
+    const match = /^([A-Za-z_]+)\s*=\s*(.*)$/.exec(line);
+    if (!match) continue;
+    const key = match[1]!;
+    const index = existing.findIndex(row => new RegExp(`^\\s*${key}\\s*=`).test(row));
+    if (index < 0) { existing.push(line); continue; }
+    if (key === "env") {
+      existing[index] = `env = ${mergeInlineEnv(existing[index]!.replace(/^\s*env\s*=\s*/, ""), match[2]!)}`;
+    } else if (key === "command" || key === "args") {
+      existing[index] = line;
+    } else if (key === "tool_timeout_sec" && /DSH_WAIT_PROFILE = "long"/.test(block)) {
+      const prior = Number(existing[index]!.split("=")[1]?.split("#")[0]?.trim());
+      if (!Number.isFinite(prior)) throw new Error("unsupported tool_timeout_sec syntax; configuration was not changed");
+      existing[index] = `tool_timeout_sec = ${Math.max(prior, 960)}`;
+    }
+  }
+  if (tail.some(row => row.trim() === `[mcp_servers.${SERVER_NAME}.env]`)) {
+    throw new Error("nested dsh_desktop.env table requires manual merge; configuration was not changed");
+  }
+  const merged = [...head, CODEX_TABLE_HEADER, ...existing, ...tail].join("\n");
   return `${merged.replace(/\n{3,}/gu, "\n\n").trimEnd()}\n`;
 }
 
@@ -232,7 +278,20 @@ export function applyClaudeEntry(content: string | undefined, entry: Record<stri
       : (typeof servers === "object" && !Array.isArray(servers) ? { ...(servers as Record<string, unknown>) } : undefined);
   if (table === undefined) throw new Error("the target Claude configuration has a non-object mcpServers entry");
   if (entry === undefined) delete table[SERVER_NAME];
-  else table[SERVER_NAME] = entry;
+  else {
+    const previous = table[SERVER_NAME];
+    if (previous !== undefined && (previous === null || typeof previous !== "object" || Array.isArray(previous))) throw new Error("dsh_desktop entry is not an object");
+    const old = (previous ?? {}) as Record<string, unknown>;
+    if (old.env !== undefined && (old.env === null || typeof old.env !== "object" || Array.isArray(old.env))) throw new Error("dsh_desktop env is not an object");
+    const merged: Record<string, unknown> = { ...old, ...entry, env: { ...(old.env as object ?? {}), ...(entry.env as object ?? {}) } };
+    if ((entry.env as Record<string, unknown> | undefined)?.DSH_WAIT_PROFILE === "long") {
+      if (old.timeout !== undefined && (typeof old.timeout !== "number" || !Number.isFinite(old.timeout) || old.timeout < 0)) {
+        throw new Error("unsupported Claude per-server timeout; configuration was not changed");
+      }
+      merged.timeout = Math.max(typeof old.timeout === "number" ? old.timeout : 0, 960_000);
+    }
+    table[SERVER_NAME] = merged;
+  }
   return `${JSON.stringify({ ...parsed, mcpServers: table }, null, 2)}\n`;
 }
 
@@ -315,6 +374,7 @@ export async function buildPlan(options: SetupOptions): Promise<PlanReport> {
     options.caller === "both" ? ["codex", "claude"] : [options.caller];
   for (const caller of callers) {
     const env = bridgeEnvironment(desktop.connectionFile ?? "<DSH_CONNECTION_FILE>", caller);
+    if (options.waitProfile !== undefined) env.DSH_WAIT_PROFILE = options.waitProfile;
     const configPath = caller === "codex" ? codexConfigPath(options.scope, options.projectDir) : claudeConfigPath(options.scope, options.projectDir);
     const before = await readFile(configPath, "utf8").catch(() => undefined);
     const rendered =
@@ -338,6 +398,7 @@ export async function buildPlan(options: SetupOptions): Promise<PlanReport> {
           ? "identical"
           : classifyExisting(caller, before, rendered),
       content: rendered,
+      expectedBefore: before ?? null,
     });
 
     const source = fileURLToPath(new URL(`../skill/${SKILL_NAMES[caller]}`, import.meta.url));
@@ -366,6 +427,13 @@ async function copySkill(source: string, target: string): Promise<string[]> {
       written.push(...(await copySkill(from, to)));
     } else if (entry.isFile()) {
       await mkdir(dirname(to), { recursive: true });
+      const content = await readFile(from);
+      const previous = await readFile(to).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      });
+      if (previous?.equals(content)) continue;
+      if (previous !== undefined) await copyFile(to, `${to}.bak-dsh-desktop-cowork-${Date.now()}`);
       await copyFile(from, to);
       written.push(to);
     }
@@ -408,6 +476,9 @@ export async function applyPlan(plan: PlanReport): Promise<{ lines: string[]; ch
         continue;
       }
       const snapshot = await readConfigSnapshot(write.target);
+      if (write.expectedBefore !== undefined && (snapshot.exists !== (write.expectedBefore !== null) || (snapshot.exists && snapshot.content !== write.expectedBefore))) {
+        throw new Error("configuration changed after planning; no replacement was made, rerun setup");
+      }
       const result = await atomicInstallText({
         path: write.target,
         content: write.content ?? "",

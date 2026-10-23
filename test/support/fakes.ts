@@ -146,7 +146,11 @@ export class FakeDshApi implements DshApi {
 export class FakeConnection implements DshConnection {
   state: HostConnectionSnapshot;
   pending: DshPendingEnvelope[] = [];
-  queue: QueueSnapshot = { known: true, stale: false, connectionEpoch: 1, items: [] };
+  // No implicit empty Host baseline. Tests must supply positive evidence,
+  // and Desktop acceptance must exercise its adapter rather than these caches.
+  queue: QueueSnapshot = { known: false, stale: false, connectionEpoch: 1, items: [] };
+  jobs = { known: false, active: false };
+  jobsForSession() { return this.jobs; }
   lineage: TaskLineageSession[] = [];
   tracked: TaskRecord[] = [];
   histories = new Map<string, DshSessionHistory>();

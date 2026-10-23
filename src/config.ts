@@ -24,6 +24,8 @@ export interface BridgeConfig {
   approvalMode?: "desktop";
   /** Model policy: inherit the Host's own selection, never override it. */
   modelPolicy?: "inherit";
+  /** Opt-in only after the calling client's long-call behaviour has been verified. */
+  waitProfile?: "bounded" | "long";
 }
 
 const DEFAULT_HOST_URL = "http://127.0.0.1:3080";
@@ -132,6 +134,8 @@ function assertPairedEnvironmentIsClean(env: NodeJS.ProcessEnv): void {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
+  const waitProfile = env.DSH_WAIT_PROFILE ?? "bounded";
+  if (waitProfile !== "bounded" && waitProfile !== "long") throw new BridgeConfigError("DSH_WAIT_PROFILE must be bounded or long");
   const allowRemoteHost = booleanEnv(env.DSH_ALLOW_REMOTE_HOST);
   const requestedHostMode = env.DSH_HOST_MODE?.trim() || "static";
   if (requestedHostMode !== "static" && requestedHostMode !== "desktop-auto" && requestedHostMode !== "desktop-paired") {
@@ -192,5 +196,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     callerKind: callerKindOf(env.DSH_CALLER_KIND),
     approvalMode: "desktop",
     modelPolicy: "inherit",
+    waitProfile,
   };
 }

@@ -16,6 +16,11 @@
 
 ## 安装
 
+P3 长等待实现与验收：见 [long-wait.md](docs/long-wait.md)。支持显式 900 秒
+terminal 等待、取消观察隔离、限频进度、增量账本与共享检查。两端正式配置
+默认仍是 bounded；150 秒/10 分钟协议测试通过不等于原生客户端界面验收通过。
+临时 `dsh_wait_acceptance` 只运行定时器，用于无模型开销的客户端验收。
+
 需要：Windows 10/11 x64，已为当前用户安装 DeepSeek Harness Desktop，以及 Codex 和/或 Claude Code。
 
 ### 方式一：安装包（推荐）
@@ -76,7 +81,21 @@ npm run build
 - 你的话里提到 DSH 就会自动触发对应的 skill；也可以显式调用：Claude Code 里输入 `/claude-dsh-desktop`，Codex 里输入 `$codex-dsh-desktop`。
 - 模型和推理强度沿用 DSH Desktop 里的设置，这里不能修改。
 - DSH 需要审批或向你提问时，到 DSH Desktop 里处理，Codex / Claude 不会代你批准。
-- 同一个目录同一时间只允许一个任务写入。任务验收完之后，Codex / Claude 会释放这个目录的占用。
+- 同一个目录同一时间只允许一个任务写入。任务验收后，桥接通过 Desktop 的实时 inbox 和 job/list 检查待处理输入及活动作业，再释放目录占用；接口缺失、状态过期或读取失败仍保留占用并报告 `workspace_state_unknown`。已验证 Desktop 0.2.1-rc.2 的完整连续写任务流程。
+
+### 监督耗额修复（2026-10-21）
+
+新版两端 skill 使用 `dsh_wait(until="terminal", responseMode="compact")`：普通工具事件留在桥接内部，只有终态、待人工处理、连接/恢复异常或等待期限到达才返回。摘要用 `nextCursor` 续接；完整结果通过 `dsh_status` / `dsh_tail` 获取并验收。旧调用仍默认 `change/full`，阶段检查、steer/cancel 和历史恢复保持可用。
+
+已安装旧版本时，在本源码目录构建并更新（会备份配置并保留自定义字段）：
+
+```powershell
+npm run build
+npm run setup-desktop -- --caller both --scope user --wait-profile bounded --replace --dry-run
+npm run setup-desktop -- --caller both --scope user --wait-profile bounded --replace --apply
+```
+
+然后重新加载 Codex / Claude 的 MCP 服务或重启调用方；无需重装 DSH Connector。旧会话已经加载的工具和 skill 不会自动更新。默认仍为 30 秒有界等待；`--wait-profile long` 只供完成本客户端长调用、中断、并发及结果回收验证后显式启用，当前未把任一客户端标记为已验证。
 
 这些本地安装的 skill 不会出现在 Claude 桌面 app 设置里的 Skills / Plugins 页面。那两个页面管的是账号级内容。
 

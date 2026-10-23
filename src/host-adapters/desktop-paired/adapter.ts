@@ -13,6 +13,7 @@ import type {
   DshSubagentAddress,
   DshSubagentListValue,
   DshUnaryResult,
+  DshWorkspaceState,
 } from "../../dsh-types.js";
 import {
   assertCapability,
@@ -27,6 +28,8 @@ import {
   sessionListResultSchema,
   sessionPageResultSchema,
   sessionProjectionsResultSchema,
+  workspaceInboxSchema,
+  workspaceJobsSchema,
 } from "./protocol.js";
 import type { SessionEvent } from "./protocol.js";
 
@@ -260,7 +263,7 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
         ...(payload.clientTimeZone === undefined ? {} : { clientTimeZone: payload.clientTimeZone }),
       },
     }, signal);
-    return attachDshUnaryMetadata(result, { issuedRpcId: ENDPOINTS.sessionPrompt, method: ENDPOINTS.sessionPrompt });
+    return attachDshUnaryMetadata(result, { issuedRpcId: requestId, method: ENDPOINTS.sessionPrompt });
   }
 
   async sessionRename(
@@ -318,6 +321,33 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
     this.requireCapability("cancelTurn", "cancelling a turn");
     const result = await this.call<{ accepted: true }>(ENDPOINTS.sessionCancel, { request: { sessionId } }, signal);
     return attachDshUnaryMetadata(result, { issuedRpcId: ENDPOINTS.sessionCancel, method: ENDPOINTS.sessionCancel });
+  }
+
+  async sessionWorkspaceState(sessionId: string, signal?: AbortSignal): Promise<DshWorkspaceState> {
+    // On demand, never on each ordinary event. No output/log bodies are fetched.
+    const deadline = AbortSignal.timeout(10_000);
+    const bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    const queue = workspaceInboxSchema.safeParse(await this.callRaw(
+      ENDPOINTS.sessionProjections, { request: { sessionId } }, bounded,
+    ));
+    let jobs: DshWorkspaceState["jobs"] = { known: false, active: 0 };
+    for await (const frame of this.options.session.openStream(ENDPOINTS.jobList, { request: { sessionId } }, bounded)) {
+      if (frame.type !== "item") break;
+      const parsed = workspaceJobsSchema.safeParse(frame.value);
+      if (parsed.success) jobs = {
+        known: true,
+        active: parsed.data.jobs.filter(job => job.status === "running" || job.status === "stopping").length,
+      };
+      break; // closes the read-only stream in AuthSession's finally block
+    }
+    bounded.throwIfAborted();
+    return {
+      queue: queue.success ? {
+        known: true, asOfSeq: queue.data.asOfSeq,
+        pending: queue.data.values.inbox["next-turn"].length + queue.data.values.inbox["next-step"].length,
+      } : { known: false, pending: 0 },
+      jobs,
+    };
   }
 
   async sessionUpdateQueue(

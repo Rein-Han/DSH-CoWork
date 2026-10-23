@@ -127,6 +127,18 @@ test("WorkspaceClaimStore release removes claims and reports stale views", async
   }
 });
 
+test("WorkspaceClaimStore preserves a replacement claim when release uses stale evidence", async () => {
+  const home = await mkdtemp(join(tmpdir(), "codex-dsh-claims-"));
+  try {
+    const store = new WorkspaceClaimStore(home);
+    const old = await store.acquire({ canonicalCwd: home, taskId: rootTask, sessionId: "session-1", mode: "read-only" });
+    await store.release(rootTask);
+    const replacement = await store.acquire({ canonicalCwd: home, taskId: rootTask, sessionId: "session-2", mode: "read-only" });
+    await assert.rejects(store.release(rootTask, old), (e: unknown) => e instanceof WorkspaceClaimConflictError && e.code === "stale_view");
+    assert.deepEqual(await store.get(rootTask), replacement);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 test("WorkspaceClaimStore serializes two instances through the registry lock", async () => {
   const home = await mkdtemp(join(tmpdir(), "codex-dsh-claims-"));
   try {

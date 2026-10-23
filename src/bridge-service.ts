@@ -2,6 +2,7 @@ import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
 import type { BridgeConfig } from "./config.js";
+import { EventLedgerError } from "./event-ledger.js";
 import type { DshConnection, HostConnectionSnapshot, QueueSnapshot, TaskLineageSession } from "./connection-manager.js";
 import { DshRpcError, DshTransportError, formatModel, getHostEndpointSnapshot } from "./dsh-client.js";
 import type {
@@ -38,6 +39,7 @@ import type { TaskRecord } from "./task-store.js";
 import { TaskStore } from "./task-store.js";
 import type { WorkspaceClaimMode } from "./workspace-claim.js";
 import { WorkspaceClaimConflictError, WorkspaceClaimStore } from "./workspace-claim.js";
+import { waitWithPolicy, compactWait, type WaitOptions } from "./wait-policy.js";
 
 export interface DelegateInput {
   prompt: string;
@@ -119,6 +121,8 @@ export class BridgeCapabilityError extends Error {
       | "host_unreachable"
       | "model_unroutable"
       | "workspace_claim_missing"
+      | "session_busy"
+      | "workspace_state_unknown"
       | "unsupported",
     message: string,
     readonly details: Record<string, unknown> = {},
@@ -397,12 +401,12 @@ function statusShape(
     pendingInteractions: pending,
     queueDepth: queueDepth(queue),
     finalMessage: null,
-    finalMessagePointer: ledger.finalMessagePointer ?? null,
+    finalMessagePointer: isTerminal(execution) ? ledger.finalMessagePointer ?? null : null,
     finalMessageStatus:
       isTerminal(execution) &&
       (ledger.terminalMissingFinal || (execution === "interrupted" && ledger.finalMessagePointer === undefined))
         ? "terminal_missing_final"
-        : ledger.finalMessagePointer === undefined
+        : !isTerminal(execution) || ledger.finalMessagePointer === undefined
           ? "not_available"
           : "pointer_available",
     visualFallback: ledger.visualFallback ?? null,
@@ -627,6 +631,7 @@ export class BridgeService {
   private async readPointedHistory(
     taskId: string,
     pointers: LedgerEventPointer[],
+    signal?: AbortSignal,
   ): Promise<Map<string, DshHistoryEntry>> {
     const wantedBySession = new Map<string, Set<number>>();
     for (const pointer of pointers) {
@@ -639,10 +644,11 @@ export class BridgeService {
       [...wantedBySession].map(async ([sessionId, wanted]) => {
         let beforeSeq: number | undefined;
         for (let page = 0; page < 10_000 && wanted.size > 0; page += 1) {
+          signal?.throwIfAborted();
           const history = await this.connection.readSessionHistory(taskId, sessionId, {
             ...(beforeSeq === undefined ? {} : { beforeSeq }),
             maxMessages: 50,
-          });
+          }, signal);
           for (const entry of history.events) {
             if (!wanted.has(entry.event.seq)) continue;
             found.set(`${sessionId}:${entry.event.seq}`, entry);
@@ -657,9 +663,9 @@ export class BridgeService {
     return found;
   }
 
-  private async resolveFinalMessage(taskId: string, pointer: LedgerEventPointer | undefined) {
+  private async resolveFinalMessage(taskId: string, pointer: LedgerEventPointer | undefined, signal?: AbortSignal) {
     if (pointer === undefined) return { finalMessage: null, finalMessagePointer: null };
-    const entries = await this.readPointedHistory(taskId, [pointer]);
+    const entries = await this.readPointedHistory(taskId, [pointer], signal);
     const entry = entries.get(`${pointer.sessionId}:${pointer.seq}`);
     if (entry === undefined || entry.event.type !== "assistant/message") {
       return {
@@ -770,6 +776,13 @@ export class BridgeService {
       endpoint,
       connection,
       connectOnly: true,
+      observation: this.waitCapabilities(),
+      workspaceRelease: {
+        policyVersion: 2,
+        evidence: this.api.sessionWorkspaceState ? "desktop-live-inbox-and-jobs" : "mux-snapshots",
+        unknownPreservesClaim: true,
+        atomicHostFence: false,
+      },
       lifecycleOwnership: "user-or-os-service",
       // Sanitized adapter facts only: origin, versions, generation ids, the
       // selected adapter and its capabilities. No launch token, cookie, or
@@ -1206,8 +1219,9 @@ export class BridgeService {
       ...(fallbackCoordinationWarning === undefined ? {} : { fallbackCoordinationWarning }),
       ...(renameWarning === undefined ? {} : { warning: renameWarning }),
     };
-    if (waitSeconds === 0) return base;
-    return { ...base, wait: await this.wait(task.taskId, waitSeconds, beforePrompt.cursor) };
+    const waitTarget = { targetStartAfterCursor: beforePrompt.cursor };
+    if (waitSeconds === 0) return { ...base, waitTarget };
+    return { ...base, waitTarget, wait: await this.wait(task.taskId, waitSeconds, beforePrompt.cursor) };
   }
 
   async continueTask(
@@ -1241,6 +1255,9 @@ export class BridgeService {
     const selectionReason = options.selectionReason?.trim() || undefined;
     const view = await this.preflightWrite(taskId, options, true);
     const { task } = view;
+    if (mode === "steer" && view.lineage.find(row => row.sessionId === task.sessionId)?.running !== true) {
+      throw new StaleViewError("steer requires an active root turn; inspect status before choosing queue", { taskId });
+    }
     let models: DshSessionModels | undefined;
     if (visualRouting === undefined) {
       models = await this.api.sessionModels(task.sessionId);
@@ -1295,6 +1312,15 @@ export class BridgeService {
     }
     let fallbackCoordinationWarning: string | undefined;
     let receipt;
+    const beforePrompt = await this.ledger.snapshot(taskId);
+    if (mode === "steer") {
+      const fresh = await this.preflightWrite(taskId, {}, true);
+      if (fresh.lineage.find(row => row.sessionId === task.sessionId)?.running !== true ||
+          fresh.ledger.currentTurn?.startCursor !== view.ledger.currentTurn?.startCursor ||
+          isTerminal(fresh.ledger.execution)) {
+        throw new StaleViewError("the active turn changed before steer; prompt was not sent", { taskId });
+      }
+    }
     try {
       receipt = await this.api.sessionPrompt(promptPayload(this.config, task.sessionId, trimmed, mode));
       if (visualFallback !== undefined) {
@@ -1326,6 +1352,7 @@ export class BridgeService {
       rootSessionId: task.sessionId,
       mode,
       deliveryTarget: mode === "queue" ? "next-turn" : "next-step",
+      ...(mode === "queue" ? { waitTarget: { targetStartAfterCursor: beforePrompt.cursor } } : {}),
       durableWhenClaimedByDsh: true,
       model: models!.current,
       routable: models!.routable,
@@ -1362,7 +1389,8 @@ export class BridgeService {
     };
   }
 
-  async status(taskId: string) {
+  async status(taskId: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const task = await this.tasks.get(taskId);
     const workspaceClaim = await this.claims.get(taskId);
     let ledger = await this.ledger.snapshot(taskId);
@@ -1389,7 +1417,8 @@ export class BridgeService {
     }
 
     try {
-      await this.connection.refreshLineage();
+      await this.connection.refreshLineage(signal);
+      signal?.throwIfAborted();
       connection = this.connection.snapshot();
       lineage = this.connection.lineageForTask(taskId);
       pending = this.connection.pendingForTask(taskId);
@@ -1410,12 +1439,15 @@ export class BridgeService {
         };
       }
       await this.connection.reconcileTask(taskId);
+      // Reconciliation belongs to the task pump; cancel only this reader.
+      signal?.throwIfAborted();
       ledger = await this.ledger.snapshot(taskId);
       connection = this.connection.snapshot();
       pending = this.connection.pendingForTask(taskId);
       pendingExecution = interactionExecution(pending);
       queue = this.connection.queueForSession(task.sessionId);
-      const models = await this.api.sessionModels(task.sessionId);
+      const models = await this.api.sessionModels(task.sessionId, signal);
+      signal?.throwIfAborted();
       let execution =
         pendingExecution ??
         (root.running === true
@@ -1439,7 +1471,7 @@ export class BridgeService {
         ledger = await this.ledger.snapshot(taskId);
         execution = ledger.execution;
       }
-      const final = await this.resolveFinalMessage(taskId, ledger.finalMessagePointer);
+      const final = await this.resolveFinalMessage(taskId, isTerminal(execution) ? ledger.finalMessagePointer : undefined, signal);
       return {
         ...statusShape(
           task,
@@ -1536,29 +1568,70 @@ export class BridgeService {
     };
   }
 
-  async wait(taskId: string, timeoutSec: number, sinceCursor?: number) {
-    this.validateWaitSeconds(timeoutSec);
-    const initial = await this.status(taskId);
-    const cursor = sinceCursor ?? initial.cursor;
-    if (cursor < initial.earliestCursor - 1) {
-      await this.ledger.tail(taskId, cursor, 1, 1);
-    }
-    if (
-      initial.cursor > cursor ||
-      initial.pendingInteractions.length > 0 ||
-      (initial.availability === "connected" && isTerminal(initial.execution))
-    ) {
-      return { timedOut: false, status: initial, nextCursor: initial.cursor };
-    }
-    if (timeoutSec === 0) return { timedOut: true, status: initial, nextCursor: initial.cursor };
-    const change = await this.connection.waitForTaskChange(
-      taskId,
-      cursor,
-      initial.connection.revision,
-      timeoutSec * 1_000,
-    );
-    const status = await this.status(taskId);
-    return { timedOut: change.timedOut, status, nextCursor: status.cursor };
+  waitCapabilities() {
+    return { policyVersion: 2, until: ["change", "terminal"], responseMode: ["full", "compact"],
+      defaults: { until: "change", responseMode: "full", timeoutSec: 30 },
+      profile: this.config.waitProfile ?? "bounded",
+      maxTimeoutSec: this.config.waitProfile === "long" ? 900 : 30,
+      clientLongWaitVerified: false, targetStartAfterCursor: true,
+      progress: { requiresToken: true, minIntervalSec: 30, unit: "elapsedSeconds" },
+      cancelObservationCancelsTask: false, ledgerReads: "incremental", sharedLedgerPollMs: 1000 };
+  }
+
+  private async observationSnapshot(taskId: string) {
+    const task = await this.tasks.get(taskId);
+    const ledger = await this.ledger.snapshot(taskId);
+    const connection = this.connection.snapshot();
+    const lineage = this.connection.lineageForTask(taskId);
+    const pending = this.connection.pendingForTask(taskId);
+    const root = lineage.find(row => row.sessionId === task.sessionId);
+    return statusShape(task, connection, ledger, lineage,
+      connection.availability !== "connected" ? "host_unreachable" : lineage.some(r => r.sessionId === task.sessionId && r.found) ? "connected" : "session_not_found",
+      interactionExecution(pending) ?? (isTerminal(ledger.execution) && root?.running === true ? "running" : root?.blank === true ? "starting" : ledger.execution), pending,
+      this.connection.queueForSession(task.sessionId), await this.claims.get(taskId));
+  }
+
+  async wait(taskId: string, timeoutSec: number, sinceCursor?: number, options: WaitOptions = {}) {
+    const max = options.until === "terminal" ? this.waitCapabilities().maxTimeoutSec : 30;
+    if (!Number.isInteger(timeoutSec) || timeoutSec < 0 || timeoutSec > max) throw new Error(`timeoutSec must be between 0 and ${max}`);
+    if (options.targetStartAfterCursor !== undefined && options.until !== "terminal") throw new Error("targetStartAfterCursor requires explicit until=terminal");
+    const read = async (initial: boolean, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      let view: Omit<ReturnType<typeof statusShape>, "finalMessage" | "contentUnavailable"> & { finalMessage: unknown; contentUnavailable: unknown } =
+        initial && timeoutSec > 0 ? await this.status(taskId, signal) : await this.observationSnapshot(taskId);
+      // Reconcile a candidate completion once, not every ordinary event.
+      if (!initial && timeoutSec > 0) {
+        const ledger = await this.ledger.snapshot(taskId);
+        if (isTerminal(ledger.execution)) view = await this.status(taskId, signal);
+      }
+      if (sinceCursor !== undefined && (sinceCursor < view.earliestCursor - 1 || sinceCursor > view.cursor)) {
+        throw new EventLedgerError("invalid_cursor", "sinceCursor is outside the retained ledger");
+      }
+      const target = options.targetStartAfterCursor === undefined ? undefined : await this.ledger.targetRun(taskId, options.targetStartAfterCursor);
+      const start = target?.startCursor;
+      if (target !== undefined) {
+        const pendingExecution = interactionExecution(view.pendingInteractions);
+        const execution = pendingExecution ?? (start === undefined ? "starting" : target.snapshot.execution);
+        view = { ...view, cursor: target.snapshot.cursor, execution,
+          status: view.availability === "connected" ? execution : "unknown",
+          lastKnownExecutionStatus: target.snapshot.lastKnownExecutionStatus,
+          turn: start === undefined ? null : target.snapshot.currentTurn ?? null,
+          recovery: target.snapshot.unrecoverableGap === undefined ? { state: "reconciled" } : { state: "unrecoverable_gap", details: target.snapshot.unrecoverableGap },
+          finalMessage: null, finalMessagePointer: start === undefined ? null : target.snapshot.finalMessagePointer ?? null,
+          finalMessageStatus: start === undefined ? "not_available" : target.snapshot.finalMessagePointer ? "pointer_available" : target.snapshot.terminalMissingFinal ? "terminal_missing_final" : "not_available" };
+      }
+      if ((!initial || target !== undefined) && timeoutSec > 0 && options.responseMode !== "compact" && isTerminal(view.execution)) {
+        const final = await this.resolveFinalMessage(taskId, view.finalMessagePointer ?? undefined, signal);
+        view = { ...view, ...final, finalMessageStatus: final.finalMessage === null ? view.finalMessageStatus : "available" };
+      }
+      const resultCursor = view.finalMessagePointer === null ? undefined : await this.ledger.messageAfterCursor(taskId, view.finalMessagePointer);
+      return { ...view, observationRevision: this.connection.observationRevisionForTask?.(taskId) ?? view.connection.revision,
+        ...(start === undefined ? {} : { observedRunStartCursor: start }),
+        ...(resultCursor === undefined ? {} : { finalMessageAfterCursor: resultCursor }) };
+    };
+    const result = await waitWithPolicy({ timeoutSec, ...(sinceCursor === undefined ? {} : { sinceCursor }), options, read,
+      wait: (cursor, revision, remaining, signal) => this.connection.waitForTaskChange(taskId, cursor, revision, remaining, signal) });
+    return options.responseMode === "compact" ? compactWait(result) : result;
   }
 
   async observe(taskId: string, afterCursor: number | undefined, waitSeconds: number) {
@@ -1657,14 +1730,52 @@ export class BridgeService {
   }
 
   async releaseWorkspace(taskId: string) {
-    const task = await this.tasks.get(taskId);
-    const released = await this.claims.release(taskId);
+    // Reconcile interruptions using the same authority as status before checking the claim.
+    await this.status(taskId);
+    let view = await this.preflightWrite(taskId, {}, true);
+    const { task } = view;
+    let liveWork: Awaited<ReturnType<NonNullable<DshApi["sessionWorkspaceState"]>>>[] | undefined;
+    if (this.api.sessionWorkspaceState) {
+      try {
+        liveWork = await Promise.all(view.lineage.map(row => this.api.sessionWorkspaceState!(row.sessionId)));
+      } catch {
+        throw new BridgeCapabilityError("workspace_state_unknown", "fresh queue/jobs evidence is unavailable; claim preserved", {
+          taskId, claimPreserved: true, missingEvidence: { queue: true, jobs: true },
+        });
+      }
+      // The Host does not offer an atomic release fence. Re-read lineage and
+      // ledger after the live reads and reject observable races before unlink.
+      const checked = await this.preflightWrite(taskId, {}, true);
+      if (checked.connection.connectionEpoch !== view.connection.connectionEpoch ||
+          checked.ledger.cursor !== view.ledger.cursor ||
+          checked.lineage.map(row => row.sessionId).sort().join("\n") !== view.lineage.map(row => row.sessionId).sort().join("\n")) {
+        throw new StaleViewError("task changed while reading release evidence; claim preserved", { taskId });
+      }
+      // Keep the original claim for the registry-lock compare, not its replacement.
+      view = { ...checked, workspaceClaim: view.workspaceClaim };
+    }
+    const pending = this.connection.pendingForTask(taskId);
+    const busy = view.lineage.some(row => row.running === true) || pending.length > 0 || !isTerminal(view.ledger.execution);
+    const queues = liveWork?.map(row => ({ known: row.queue.known, stale: false, pending: row.queue.pending }))
+      ?? view.lineage.map(row => { const q = this.connection.queueForSession(row.sessionId); return { ...q, pending: q.items.length }; });
+    const jobs = liveWork?.map(row => ({ known: row.jobs.known, active: row.jobs.active > 0 }))
+      ?? view.lineage.map(row => this.connection.jobsForSession?.(row.sessionId));
+    if (busy || queues.some(q => q.pending > 0) || jobs.some(j => j?.active)) {
+      throw new BridgeCapabilityError("session_busy", "workspace is still active; claim preserved", { taskId, claimPreserved: true });
+    }
+    if (view.lineage.some(row => !row.found || row.running === undefined) || queues.some(q => !q.known || q.stale) || jobs.some(j => !j?.known)) {
+      throw new BridgeCapabilityError("workspace_state_unknown", "cannot prove that all sessions, queues and jobs are idle; claim preserved", {
+        taskId, claimPreserved: true, missingEvidence: { queue: queues.some(q => !q.known || q.stale), jobs: jobs.some(j => !j?.known) },
+      });
+    }
+    const released = await this.claims.release(taskId, view.workspaceClaim);
     return {
       taskId,
       rootSessionId: task.sessionId,
       released,
       sessionClosedByRelease: false,
-      sessionExistence: "not_checked",
+      sessionExistence: "verified",
+      releaseEvidence: { source: liveWork ? "desktop-live" : "mux", sessions: view.lineage.length, queueKnownEmpty: true, jobsKnownIdle: true },
       warning:
         "Releasing the bridge claim does not close the DSH session or prevent DSH Web/Codex shell edits. Do not continue this session against the released workspace unless a new isolated worktree/claim is established.",
     };

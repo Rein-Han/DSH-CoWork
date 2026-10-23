@@ -37,6 +37,7 @@ export const ENDPOINTS = {
   sessionFollow: "session/follow",
   sessionCancel: "session/cancel",
   sessionProjections: "session/projections",
+  jobList: "job/list",
   sessionRename: "session/rename",
   sessionUpdateQueue: "session/updateQueue",
   sessionModelCatalog: "session/modelCatalog",
@@ -153,6 +154,27 @@ export const sessionCreateResultSchema = z
 export const sessionProjectionsResultSchema = z
   .object({ asOfSeq: z.number(), values: z.unknown() })
   .passthrough();
+
+// Inspected in installed 0.2.1-rc.2: sequenced inbox is authoritative; cached
+// or migration-required projections and omitted inbox are not empty queues.
+export const workspaceInboxSchema = z.object({
+  kind: z.literal("sequenced"),
+  asOfSeq: z.number().int().nonnegative(),
+  values: z.object({ inbox: z.object({
+    "next-turn": z.array(z.unknown()),
+    "next-step": z.array(z.unknown()),
+  }) }),
+});
+
+// job/list opens with a complete rows snapshot (own + unowned jobs).
+// Unknown lifecycle values must never be interpreted as terminal.
+export const workspaceJobsSchema = z.object({
+  type: z.literal("rows"),
+  jobs: z.array(z.object({
+    id: z.string().min(1),
+    status: z.enum(["running", "stopping", "completed", "failed", "killed"]),
+  })),
+});
 
 /**
  * The `session/page` cursor contract: `throughSeq` is required and the page is

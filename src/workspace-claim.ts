@@ -161,12 +161,15 @@ export class WorkspaceClaimStore {
     });
   }
 
-  async release(taskId: string): Promise<WorkspaceClaim> {
+  async release(taskId: string, expected?: WorkspaceClaim): Promise<WorkspaceClaim> {
     requireTaskId(taskId);
     return this.withRegistryLock(async () => {
       const claim = await this.readClaim(taskId);
       if (claim === undefined) {
         throw new WorkspaceClaimConflictError("stale_view", `workspace claim does not exist for task ${taskId}`);
+      }
+      if (expected !== undefined && (claim.createdAt !== expected.createdAt || claim.sessionId !== expected.sessionId || claim.cwd !== expected.cwd || claim.mode !== expected.mode)) {
+        throw new WorkspaceClaimConflictError("stale_view", "workspace claim changed after preflight; claim preserved");
       }
       await unlink(this.pathFor(taskId));
       return cloneClaim(claim);

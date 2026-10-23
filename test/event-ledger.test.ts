@@ -238,7 +238,7 @@ test("EventLedger reloads writes from another instance and allocates cursors und
     assert.deepEqual(tail.records.map((record) => record.cursor), Array.from({ length: 20 }, (_, index) => index + 1));
 
     const waitStarted = Date.now();
-    const wait = left.waitForCursor(taskId, 20, 1_000);
+    const wait = left.waitForCursor(taskId, 20, 2_000);
     await right.append(taskId, {
       sourceSessionId: "root",
       sourceSeq: 20,
@@ -247,7 +247,7 @@ test("EventLedger reloads writes from another instance and allocates cursors und
       raw: sessionEvent(20, "turn/end", { turn: 1, reason: { kind: "completed" } }),
     });
     await wait;
-    assert.ok(Date.now() - waitStarted < 500, "cross-instance wait should observe the other writer before timeout");
+    assert.ok(Date.now() - waitStarted < 1_500, "cross-instance wait should observe the other writer within the one-second polling bound");
   } finally {
     await rm(home, { recursive: true, force: true });
   }

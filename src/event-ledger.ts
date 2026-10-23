@@ -1,4 +1,4 @@
-import { appendFile, chmod, mkdir, readFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, open, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { withFileLock } from "./file-lock.js";
@@ -140,12 +140,15 @@ interface TaskState {
   latestSnapshotProjections: Map<string, string>;
   bridgeIssuedRpcIds: Set<string>;
   fold: FoldState;
+  disk?: { size: number; ino: number; dev: number; mtimeMs: number; ctimeMs: number; tail: Buffer };
+  target?: { anchor: number; processed: number; starts: number[]; receipts: Array<string | undefined>; sources: Set<string>; steering: Set<string> };
 }
 
 interface Waiter {
   afterCursor: number;
   resolve: () => void;
   timer: ReturnType<typeof setTimeout>;
+  reject: (error: unknown) => void;
 }
 
 const TASK_ID_PATTERN = /^dsh_[a-f0-9]{12}$/;
@@ -615,6 +618,7 @@ function foldRecord(fold: FoldState, record: LedgerRecord): void {
   if (record.origin !== "root") return;
 
   if (eventType === "turn/start") {
+    delete fold.snapshot.finalMessagePointer;
     fold.turnHadAssistant = false;
     setExecution(fold, "running");
     const turn = numberField(asObject(event)?.data, "turn");
@@ -809,6 +813,13 @@ export class EventLedger {
   private readonly states = new Map<string, TaskState>();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly waiters = new Map<string, Set<Waiter>>();
+  private readonly pollers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly metrics = { fullScans: 0, incrementalReads: 0, bytesRead: 0, recordsRead: 0, pollChecks: 0 };
+
+  /** Non-content counters for acceptance tests and local diagnostics only. */
+  observationDiagnostics() {
+    return { ...this.metrics, waiters: [...this.waiters.values()].reduce((n, set) => n + set.size, 0), pollers: this.pollers.size };
+  }
 
   constructor(homeDir: string) {
     this.ledgersDir = join(homeDir, "ledgers");
@@ -848,13 +859,18 @@ export class EventLedger {
           coordination: sanitizedRaw(input, recordType, sourceSessionId, sourceSeq),
         };
 
-        await appendFile(this.logPath(taskId), `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+        const line = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+        await appendFile(this.logPath(taskId), line, { mode: 0o600 });
         await chmod(this.logPath(taskId), 0o600);
         state.records.push(record);
         if (key !== undefined) state.seenKeys.add(key);
         this.indexSnapshotProjection(state, record);
         this.indexCoordinationMetadata(state, record);
         foldRecord(state.fold, record);
+        const info = await stat(this.logPath(taskId));
+        state.disk = { size: info.size, ino: info.ino, dev: info.dev, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs,
+          tail: Buffer.from(Buffer.concat([state.disk?.tail ?? Buffer.alloc(0), line]).subarray(-128)) };
+        this.states.set(taskId, state);
         this.notify(taskId, record.cursor);
         return record;
       });
@@ -946,22 +962,85 @@ export class EventLedger {
     return { records, nextCursor, earliestCursor: snapshot.earliestCursor, hasMore };
   }
 
-  async waitForCursor(taskId: string, afterCursor: number, timeoutMs: number): Promise<void> {
+  async waitForCursor(taskId: string, afterCursor: number, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if ((await this.readLocked(taskId)).fold.snapshot.cursor > afterCursor || timeoutMs <= 0) return;
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
+        const finish = () => { signal?.removeEventListener("abort", abort); resolve(); };
+        const abort = () => this.settleWaiter(taskId, waiter);
         const waiter: Waiter = {
           afterCursor,
-          resolve,
-          timer: setTimeout(() => this.settleWaiter(taskId, waiter), Math.min(25, deadline - Date.now())),
+          resolve: finish,
+          timer: setTimeout(() => this.settleWaiter(taskId, waiter), timeoutMs),
+          reject: (error) => { this.settleWaiter(taskId, waiter, false); signal?.removeEventListener("abort", abort); reject(error); },
         };
         const set = this.waiters.get(taskId) ?? new Set<Waiter>();
         set.add(waiter);
         this.waiters.set(taskId, set);
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+        this.startPolling(taskId);
+        // Close registration race for each reader; periodic I/O is task-shared.
+        void this.snapshot(taskId).then(s => { if (s.cursor > afterCursor) abort(); }, waiter.reject);
       });
-      if ((await this.readLocked(taskId)).fold.snapshot.cursor > afterCursor) return;
+      signal?.throwIfAborted();
+  }
+
+  private startPolling(taskId: string): void {
+    if (this.pollers.has(taskId) || !this.waiters.has(taskId)) return;
+    const timer = setTimeout(() => {
+      this.metrics.pollChecks++;
+      void this.snapshot(taskId).then(s => this.notify(taskId, s.cursor), error => {
+        for (const waiter of [...(this.waiters.get(taskId) ?? [])]) waiter.reject(error);
+      }).finally(() => {
+        // A new generation may have registered while this read was in flight.
+        if (this.pollers.get(taskId) === timer) this.pollers.delete(taskId);
+        this.startPolling(taskId);
+      });
+    }, 1000);
+    this.pollers.set(taskId, timer);
+  }
+
+  async targetRun(taskId: string, afterCursor: number) {
+    const state = await this.readLocked(taskId);
+    if (afterCursor < state.fold.snapshot.earliestCursor - 1 || afterCursor > state.fold.snapshot.cursor) {
+      throw new EventLedgerError("invalid_cursor", "wait target cursor is outside the retained ledger");
     }
+    const target = state.target?.anchor === afterCursor ? state.target :
+      { anchor: afterCursor, processed: afterCursor, starts: [] as number[], receipts: [] as Array<string | undefined>, sources: new Set<string>(), steering: new Set<string>() };
+    state.target = target;
+    for (let i = target.processed; i < state.records.length; i++) {
+      const r = state.records[i]!;
+      if (r.origin === "root" && stringField(eventOf(r.coordination), "type") === "turn/start") target.starts.push(r.cursor);
+      const issued = stringField(r.metadata, "issuedRpcId");
+      if (r.type === "bridge/prompt-issued" && stringField(r.coordination, "mode") === "queue") target.receipts.push(issued);
+      if (r.type === "bridge/prompt-issued" && stringField(r.coordination, "mode") === "steer" && issued !== undefined) target.steering.add(issued);
+      const source = stringField(r.metadata, "sourceRpcId");
+      if (r.origin === "root" && source !== undefined) target.sources.add(source);
+    }
+    target.processed = state.records.length;
+    const starts = target.starts;
+    if (starts.length > 1) throw Object.assign(new Error("multiple root turns started after the wait target; inspect dsh_tail"), { code: "ambiguous_wait_target" });
+    const receipts = target.receipts;
+    // An accepted input may precede turn/start. Only this anchor's receipts
+    // authorize input; a manual message mixed with the right receipt is still ambiguous.
+    const sourceIds = [...target.sources];
+    const issued = receipts.length === 1 ? receipts[0] : undefined;
+    const attributed = issued !== undefined && sourceIds.includes(issued);
+    const steeringIds = target.steering;
+    if (receipts.length > 1 || sourceIds.some(id => id !== issued && !steeringIds.has(id))) {
+      throw Object.assign(new Error("wait target cannot be uniquely attributed to the queued bridge prompt; inspect dsh_tail"), { code: "ambiguous_wait_target" });
+    }
+    if (starts.length === 1 && ["turn_completed", "failed", "canceled", "interrupted"].includes(state.fold.snapshot.execution) && !attributed) {
+      throw Object.assign(new Error("completed run lacks prompt attribution evidence; inspect dsh_tail before acceptance"), { code: "unverified_wait_target" });
+    }
+    return { startCursor: starts[0], snapshot: structuredClone(state.fold.snapshot) };
+  }
+
+  async messageAfterCursor(taskId: string, pointer: LedgerEventPointer): Promise<number | undefined> {
+    const state = await this.readLocked(taskId);
+    const record = state.records.find(r => r.sourceSessionId === pointer.sessionId && r.sourceSeq === pointer.seq);
+    return record === undefined ? undefined : record.cursor - 1;
   }
 
   private async serial<T>(taskId: string, work: () => Promise<T>): Promise<T> {
@@ -981,38 +1060,6 @@ export class EventLedger {
     return next;
   }
 
-  private async load(taskId: string): Promise<TaskState> {
-    requireTaskId(taskId);
-    const existing = this.states.get(taskId);
-    if (existing !== undefined) {
-      if (existing.loaded) return existing;
-      if (existing.loading !== undefined) await existing.loading;
-      return existing;
-    }
-
-    const state: TaskState = {
-      loaded: false,
-      records: [],
-      seenKeys: new Set(),
-      latestSnapshotProjections: new Map(),
-      bridgeIssuedRpcIds: new Set(),
-      fold: emptyFold(this.logPath(taskId)),
-    };
-    this.states.set(taskId, state);
-    state.loading = this.scan(taskId, state).then(
-      () => {
-        state.loaded = true;
-        delete state.loading;
-      },
-      (error: unknown) => {
-        this.states.delete(taskId);
-        throw error;
-      },
-    );
-    await state.loading;
-    return state;
-  }
-
   private async readLocked(taskId: string): Promise<TaskState> {
     await this.ensureTaskDir(taskId);
     return withFileLock(this.lockPath(taskId), () => this.reloadUnlocked(taskId));
@@ -1020,7 +1067,47 @@ export class EventLedger {
 
   private async reloadUnlocked(taskId: string): Promise<TaskState> {
     requireTaskId(taskId);
-    const state: TaskState = {
+    let state: TaskState = this.states.get(taskId) ?? this.emptyState(taskId);
+    try {
+      const file = await open(this.logPath(taskId), "r");
+      try {
+        const info = await file.stat();
+        const prior = state.disk;
+        const identityMatches = prior && info.ino === prior.ino && info.dev === prior.dev;
+        if (identityMatches && info.size === prior.size && info.mtimeMs === prior.mtimeMs && info.ctimeMs === prior.ctimeMs) return state;
+        let offset = 0;
+        if (identityMatches && info.size > prior.size) {
+          const boundary = Buffer.alloc(prior.tail.length);
+          await file.read(boundary, 0, boundary.length, prior.size - boundary.length);
+          this.metrics.bytesRead += boundary.length;
+          if (boundary.equals(prior.tail)) offset = prior.size;
+        }
+        if (offset === 0) { state = this.emptyState(taskId); this.metrics.fullScans++; }
+        else this.metrics.incrementalReads++;
+        const buffer = Buffer.alloc(info.size - offset);
+        let read = 0;
+        while (read < buffer.length) {
+          const chunk = await file.read(buffer, read, buffer.length - read, offset + read);
+          if (chunk.bytesRead === 0) throw new EventLedgerError("unrecoverable_gap", "ledger changed during locked read");
+          read += chunk.bytesRead;
+        }
+        this.metrics.bytesRead += read;
+        if (buffer.length && buffer[buffer.length - 1] !== 10) throw new EventLedgerError("unrecoverable_gap", "ledger has an incomplete trailing record");
+        this.scanText(taskId, state, buffer.toString("utf8"));
+        state.disk = { size: info.size, ino: info.ino, dev: info.dev, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs,
+          tail: Buffer.from(Buffer.concat([offset ? prior!.tail : Buffer.alloc(0), buffer]).subarray(-128)) };
+      } finally { await file.close(); }
+    } catch (error) {
+      this.states.delete(taskId); // Never reuse a partially folded or missing file.
+      if (errorCode(error) !== "ENOENT") throw error;
+      state = this.emptyState(taskId);
+    }
+    this.states.set(taskId, state);
+    return state;
+  }
+
+  private emptyState(taskId: string): TaskState {
+    return {
       loaded: true,
       records: [],
       seenKeys: new Set(),
@@ -1028,22 +1115,16 @@ export class EventLedger {
       bridgeIssuedRpcIds: new Set(),
       fold: emptyFold(this.logPath(taskId)),
     };
-    await this.scan(taskId, state);
-    this.states.set(taskId, state);
-    return state;
   }
 
-  private async scan(taskId: string, state: TaskState): Promise<void> {
-    let raw: string;
-    try {
-      raw = await readFile(this.logPath(taskId), "utf8");
-    } catch (error) {
-      if (errorCode(error) === "ENOENT") return;
-      throw error;
-    }
+  private scanText(taskId: string, state: TaskState, raw: string): void {
     const lines = raw.split(/\n/).filter((line) => line.length > 0);
+    const previousLength = state.records.length;
+    let newReceipt = false;
     for (const line of lines) {
+      this.metrics.recordsRead++;
       const record = parseRecord(line, this.logPath(taskId));
+      newReceipt ||= record.type === "bridge/prompt-issued";
       const expectedCursor = state.records.length + 1;
       if (record.cursor !== expectedCursor) {
         throw new EventLedgerError(
@@ -1072,7 +1153,7 @@ export class EventLedger {
     // A prompt response can reach the caller after its user/message was already
     // observed on the mux.  Re-evaluate attribution after the full coordination
     // log is indexed so a later bridge/prompt-issued record closes that race.
-    for (const record of state.records) {
+    for (const record of state.records.slice(newReceipt ? 0 : previousLength)) {
       if (record.type !== "session/event") continue;
       const sourceRpcId = stringField(record.metadata, "sourceRpcId");
       if (sourceRpcId === undefined) continue;
@@ -1091,7 +1172,15 @@ export class EventLedger {
 
   private indexCoordinationMetadata(state: TaskState, record: LedgerRecord): void {
     const issuedRpcId = stringField(record.coordination, "issuedRpcId") ?? stringField(record.metadata, "issuedRpcId");
-    if (record.type === "bridge/prompt-issued" && issuedRpcId !== undefined) state.bridgeIssuedRpcIds.add(issuedRpcId);
+    if (record.type === "bridge/prompt-issued" && issuedRpcId !== undefined) {
+      state.bridgeIssuedRpcIds.add(issuedRpcId);
+      // The receipt may arrive after its user/message on the mux.
+      for (const prior of state.records) {
+        if (prior.type === "session/event" && stringField(prior.metadata, "sourceRpcId") === issuedRpcId) {
+          prior.metadata = { ...prior.metadata, initiatedBy: "bridge" };
+        }
+      }
+    }
   }
 
   private async ensureTaskDir(taskId: string): Promise<void> {
@@ -1117,12 +1206,16 @@ export class EventLedger {
     }
   }
 
-  private settleWaiter(taskId: string, waiter: Waiter): void {
+  private settleWaiter(taskId: string, waiter: Waiter, resolve = true): void {
     clearTimeout(waiter.timer);
     const set = this.waiters.get(taskId);
     set?.delete(waiter);
-    if (set?.size === 0) this.waiters.delete(taskId);
-    waiter.resolve();
+    if (set?.size === 0) {
+      this.waiters.delete(taskId);
+      clearTimeout(this.pollers.get(taskId));
+      this.pollers.delete(taskId);
+    }
+    if (resolve) waiter.resolve();
   }
 }
 

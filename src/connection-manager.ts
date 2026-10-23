@@ -78,17 +78,20 @@ export interface DshConnection {
   stop(): Promise<void>;
   snapshot(): HostConnectionSnapshot;
   trackTask(task: TaskRecord): Promise<void>;
-  refreshLineage(): Promise<void>;
+  refreshLineage(signal?: AbortSignal): Promise<void>;
   reconcileTask(taskId: string): Promise<void>;
   readSessionHistory(
     taskId: string,
     sessionId: string,
     options?: { beforeSeq?: number; maxMessages?: number },
+    signal?: AbortSignal,
   ): Promise<DshSessionHistory>;
   lineageForTask(taskId: string): TaskLineageSession[];
   pendingForTask(taskId: string): DshPendingEnvelope[];
   queueForSession(sessionId: string): QueueSnapshot;
-  waitForTaskChange(taskId: string, afterCursor: number, afterRevision: number, waitMs: number): Promise<TaskChangeResult>;
+  jobsForSession?(sessionId: string): { known: boolean; active: boolean };
+  observationRevisionForTask?(taskId: string): number;
+  waitForTaskChange(taskId: string, afterCursor: number, afterRevision: number, waitMs: number, signal?: AbortSignal): Promise<TaskChangeResult>;
   answerQuestion(taskId: string, requestId: string, answers: DshQuestionAnswer[]): Promise<unknown>;
   resolveApproval(taskId: string, requestId: string, outcome: "allow_once" | "reject"): Promise<unknown>;
 }
@@ -256,6 +259,9 @@ export class DshConnectionManager implements DshConnection {
   private readonly tombstones = new Map<string, { sessionId: string; type: string; resolvedAt: string }>();
   private readonly approvalTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly queues = new Map<string, QueueSnapshot>();
+  private readonly taskObservationRevisions = new Map<string, number>();
+  private availabilityObservationRevision = 0;
+  private readonly jobViews = new Map<string, { epoch: number; known: boolean; active: boolean }>();
   private readonly tasksById = new Map<string, TaskRecord>();
   private readonly taskBySession = new Map<string, string>();
   private readonly lineage = new Map<string, TaskLineageSession[]>();
@@ -350,9 +356,10 @@ export class DshConnectionManager implements DshConnection {
     }
   }
 
-  async refreshLineage(): Promise<void> {
-    const before = lineageSignature(this.lineage);
-    const [taskRecords, list] = await Promise.all([this.tasks.list(), this.api.sessionList()]);
+  async refreshLineage(signal?: AbortSignal): Promise<void> {
+    const before = new Map([...this.lineage].map(([id, rows]) => [id, lineageSignature(new Map([[id, rows]]))]));
+    const [taskRecords, list] = await Promise.all([this.tasks.list(), this.api.sessionList(signal)]);
+    signal?.throwIfAborted();
     this.tasksById.clear();
     this.taskBySession.clear();
     this.lineage.clear();
@@ -370,7 +377,9 @@ export class DshConnectionManager implements DshConnection {
       this.queues.delete(sessionId);
     }
     await this.resolveSubagentAddresses();
-    if (lineageSignature(this.lineage) !== before) this.bumpRevision();
+    for (const [id, rows] of this.lineage) {
+      if (lineageSignature(new Map([[id, rows]])) !== before.get(id)) this.bumpRevision(id);
+    }
   }
 
   async reconcileTask(taskId: string): Promise<void> {
@@ -385,6 +394,7 @@ export class DshConnectionManager implements DshConnection {
     taskId: string,
     sessionId: string,
     options: { beforeSeq?: number; maxMessages?: number } = {},
+    signal?: AbortSignal,
   ): Promise<DshSessionHistory> {
     const runtime = this.sessions.get(sessionId);
     if (runtime === undefined || runtime.taskId !== taskId) {
@@ -394,8 +404,8 @@ export class DshConnectionManager implements DshConnection {
       });
     }
     return runtime.lineage.origin === "root"
-      ? this.api.sessionHistory(sessionId, options)
-      : this.readSubagentHistory(runtime, options);
+      ? this.api.sessionHistory(sessionId, options, signal)
+      : this.readSubagentHistory(runtime, options, signal);
   }
 
   lineageForTask(taskId: string): TaskLineageSession[] {
@@ -419,17 +429,30 @@ export class DshConnectionManager implements DshConnection {
     };
   }
 
+  jobsForSession(sessionId: string) {
+    const view = this.jobViews.get(sessionId);
+    return { known: this.state.availability === "connected" && view?.epoch === this.state.connectionEpoch && view.known,
+      active: view?.active ?? false };
+  }
+
+  observationRevisionForTask(taskId: string): number {
+    return Math.max(this.taskObservationRevisions.get(taskId) ?? 0, this.availabilityObservationRevision);
+  }
+
   async waitForTaskChange(
     taskId: string,
     afterCursor: number,
     afterRevision: number,
     waitMs: number,
+    signal?: AbortSignal,
   ): Promise<TaskChangeResult> {
+    signal?.throwIfAborted();
     const before = await this.ledger.snapshot(taskId);
-    if (before.cursor > afterCursor || this.state.revision > afterRevision || waitMs <= 0) {
+    if (before.cursor > afterCursor || this.observationRevisionForTask(taskId) > afterRevision || waitMs <= 0) {
       return { timedOut: false, connection: this.snapshot(), ledger: before };
     }
     await new Promise<void>((resolve) => {
+      const observer = new AbortController();
       let settled = false;
       let waiter: ChangeWaiter;
       const settle = () => {
@@ -437,6 +460,8 @@ export class DshConnectionManager implements DshConnection {
         settled = true;
         clearTimeout(waiter.timer);
         this.waiters.delete(waiter);
+        signal?.removeEventListener("abort", settle);
+        observer.abort();
         resolve();
       };
       waiter = {
@@ -446,10 +471,13 @@ export class DshConnectionManager implements DshConnection {
         timer: setTimeout(settle, waitMs),
       };
       this.waiters.add(waiter);
-      void this.ledger.waitForCursor(taskId, afterCursor, waitMs).then(settle, settle);
+      signal?.addEventListener("abort", settle, { once: true });
+      if (signal?.aborted || this.observationRevisionForTask(taskId) > afterRevision) settle();
+      void this.ledger.waitForCursor(taskId, afterCursor, waitMs, observer.signal).then(settle, settle);
     });
+    signal?.throwIfAborted();
     const ledger = await this.ledger.snapshot(taskId);
-    const timedOut = ledger.cursor <= afterCursor && this.state.revision <= afterRevision;
+    const timedOut = ledger.cursor <= afterCursor && this.observationRevisionForTask(taskId) <= afterRevision;
     return { timedOut, connection: this.snapshot(), ledger };
   }
 
@@ -572,7 +600,7 @@ export class DshConnectionManager implements DshConnection {
         ...this.state.capabilities,
         unaryRpc: true,
         eventsMuxWebSocket: true,
-        queueSnapshot: true,
+        queueSnapshot: this.config.hostMode !== "desktop-paired",
       },
     });
     const fallback = setTimeout(() => {
@@ -640,6 +668,11 @@ export class DshConnectionManager implements DshConnection {
     }
 
     const queueLiveChanged = frame.type === "session/queue" ? this.updateQueueView(frame.sessionId, frame.items) : false;
+    if (frame.type === "session/jobs") {
+      // Only an explicit empty snapshot proves no jobs. Unknown job statuses cannot prove idle.
+      this.jobViews.set(frame.sessionId, { epoch: this.state.connectionEpoch, known: Array.isArray(frame.jobs),
+        active: !Array.isArray(frame.jobs) || frame.jobs.length > 0 });
+    }
 
     const sessionId = sessionIdOf(frame);
     if (sessionId === undefined) return;
@@ -1111,18 +1144,21 @@ export class DshConnectionManager implements DshConnection {
 
   private setState(next: HostConnectionSnapshot): void {
     this.state = { ...next, revision: this.state.revision + 1 };
+    this.availabilityObservationRevision = this.state.revision;
     this.notifyChange();
   }
 
   private bumpRevision(taskId?: string): void {
     this.state = { ...this.state, revision: this.state.revision + 1 };
+    if (taskId === undefined) this.availabilityObservationRevision = this.state.revision;
+    else this.taskObservationRevisions.set(taskId, this.state.revision);
     this.notifyChange(taskId);
   }
 
   private notifyChange(taskId?: string): void {
     for (const waiter of [...this.waiters]) {
       if (taskId !== undefined && waiter.taskId !== taskId) continue;
-      if (this.state.revision <= waiter.afterRevision && taskId === undefined) continue;
+      if (this.observationRevisionForTask(waiter.taskId) <= waiter.afterRevision) continue;
       waiter.resolve();
     }
   }

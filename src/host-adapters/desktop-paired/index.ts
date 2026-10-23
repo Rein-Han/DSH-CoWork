@@ -196,6 +196,10 @@ export class PairedHostAdapter implements HostAdapter {
     return this.run((adapter) => adapter.sessionCancel(sessionId, signal));
   }
 
+  sessionWorkspaceState(sessionId: string, signal?: AbortSignal) {
+    return this.run((adapter) => adapter.sessionWorkspaceState(sessionId, signal));
+  }
+
   sessionUpdateQueue(sessionId: string, itemId: string, action: { kind: "remove" }, signal?: AbortSignal) {
     return this.run((adapter) => adapter.sessionUpdateQueue(sessionId, itemId, action, signal));
   }

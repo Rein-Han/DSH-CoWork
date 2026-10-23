@@ -423,17 +423,26 @@ export function createMcpServer(service: BridgeService, options: McpServerOption
     "dsh_wait",
     {
       description:
-        "Wait at most 30 seconds for a new task cursor, status/availability change, terminal state, or pending interaction. It never waits for whole-task completion.",
+        "Wait for change (legacy default) or terminal/interaction/availability. Use until=terminal,responseMode=compact for efficient supervision; fetch the complete result with dsh_status. Bounded profile max 30s; verified opt-in long profile permits terminal waits up to 900s. Timeout never cancels DSH.",
       inputSchema: z
         .object({
           taskId: taskIdSchema,
-          timeoutSec: z.number().int().min(0).max(30).default(30),
+          timeoutSec: z.number().int().min(0).max(service.waitCapabilities?.().maxTimeoutSec ?? 30).default(30),
           sinceCursor: z.number().int().min(0).optional(),
+          until: z.enum(["change", "terminal"]).optional(),
+          responseMode: z.enum(["full", "compact"]).optional(),
+          targetStartAfterCursor: z.number().int().min(0).optional(),
         })
         .strict(),
       annotations: readOnly,
     },
-    async ({ taskId, timeoutSec, sinceCursor }) => handled(() => service.wait(taskId, timeoutSec, sinceCursor)),
+    async ({ taskId, timeoutSec, sinceCursor, until, responseMode, targetStartAfterCursor }, extra) => handled(() => service.wait(taskId, timeoutSec, sinceCursor, {
+      ...(until === undefined ? {} : { until }), ...(responseMode === undefined ? {} : { responseMode }),
+      ...(targetStartAfterCursor === undefined ? {} : { targetStartAfterCursor }), signal: extra.signal,
+      ...(extra._meta?.progressToken === undefined ? {} : { progress: (progress: number) => extra.sendNotification({
+        method: "notifications/progress", params: { progressToken: extra._meta!.progressToken!, progress },
+      }) }),
+    })),
   );
 
   server.registerTool(

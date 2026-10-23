@@ -1,6 +1,10 @@
 ---
 name: claude-dsh-desktop
-description: Delegate work to the DeepSeek Harness Desktop Host already running on this machine, continue an existing DSH task, attach to a specific existing DSH Desktop session, and collect and accept its execution result over the dsh_desktop MCP server. Use when the user says "hand this to DSH", "ask DSH", "continue the DSH task", "check what DSH did" (or in Chinese: "交给 DSH", "让 DSH 做", "继续 DSH 任务", "DSH 做完了吗"), or wants a long task executed in DSH Desktop instead of this Claude Code session.
+description: >-
+  Delegate work to the running DeepSeek Harness Desktop Host, continue or attach
+  to an existing DSH task, and collect its result over the dsh_desktop MCP server.
+  Use when the user asks to hand work to DSH, continue DSH work, or check what DSH
+  did, including 交给 DSH、让 DSH 做、继续 DSH 任务、DSH 做完了吗.
 ---
 
 # Working with DSH Desktop from Claude Code
@@ -29,9 +33,12 @@ missing, read the installation diagnostic and tell the user.
 - `prompt`: the structured handoff (see below);
 - `cwd`: the real project directory;
 - `title`: a short display title;
+- `waitSeconds`: `0` (detach, then supervise explicitly);
 - `workspaceMode`: `"exclusive-write"` (default) when this task may modify files, `"read-only"` when it must not.
 
-Remember the returned `taskId` for the rest of the workstream.
+Remember the returned `taskId` and `waitTarget.targetStartAfterCursor`.
+For a queued follow-up, replace the wait target with the new receipt's target;
+steering keeps the current target. Never retry a prompt whose outcome is unknown.
 
 ## Path B — continue a task you already started
 
@@ -54,21 +61,63 @@ the answer you need. No chat transcripts, no internal reasoning, no secrets.
 
 ## While it runs
 
-`dsh_wait` returns in at most 30 seconds with `cursor`, `execution`,
-`availability`, `pendingInteractionSummary`, and `finalResultPointer`. An empty
-window is normal for long work — report progress, wait again, or stop and resume
-later with the same `taskId`.
+Check `dsh_host_status.observation` for supported options. Use:
+
+```json
+{"taskId":"<receipt taskId>","until":"terminal","responseMode":"compact","timeoutSec":30}
+```
+
+Include the receipt's `targetStartAfterCursor` on every wait for that run.
+Resume with `sinceCursor=nextCursor`. Ordinary tool events stay inside the bridge.
+The result reports `wakeReason`, `execution`, `availability`, `nextCursor`,
+`connectionRevision`, `pendingInteractions`, and `finalMessageStatus`.
+Use `change` only for deliberate phase inspection; fetch `dsh_tail` on demand.
+An empty timeout is normal: continue the user's authorized task and provide
+useful progress updates. There is no fixed number of timeouts after which to quit.
+Keep the task and cursor if the client genuinely cannot continue; do not claim
+background notifications exist. Canceling observation does not cancel DSH.
+
+Keep 30 seconds unless this particular client's long calls, interrupts, concurrent
+tools and result retrieval have been verified and its bridge profile explicitly
+enables long waits. A configured limit alone is not verification.
+Once both conditions hold, use `timeoutSec:900` for an independent long task;
+choose a shorter window for a planned inspection or unverified multi-task scenario.
+The default remains 30 even in long mode, so select the duration explicitly.
+Progress notifications do not extend the caller's hard timeout. If a wait is
+backgrounded, retain its caller task handle and collect that result; do not start
+another wait while it is pending. After observer cancellation or client timeout,
+inspect the same DSH task and resume its target; never repeat delegation.
+For client acceptance, configuration and rollback, read
+[references/long-wait.md](references/long-wait.md). A timer-only acceptance tool
+tests the caller, not DSH completion or workspace release.
+If the server lacks these options, use the bounded legacy wait and report the
+upgrade requirement; do not repeatedly send rejected options.
 
 `awaiting_approval` / `awaiting_input` means the **user** must act in DSH
 Desktop. Say so plainly; there is no tool here that answers it.
+Do not immediately repeat waits for the same unresolved interaction. Resume
+when the user has acted or a deliberate status check establishes a change.
+If the client already has a background wait, collect that result instead of
+creating another wait for the same run.
 
 ## When it finishes
 
-Read the result, then verify it yourself: inspect the changed files or diff, run
+Fetch the complete result once with `dsh_status` if the same run remains current.
+If another run has begun, use `dsh_tail` with `sinceCursor=finalMessageAfterCursor`
+and `maxEvents=1`, then verify the event's session/seq matches `finalMessagePointer`.
+Tail accepts a numeric cursor, not a pointer object. A truncated/unavailable body
+is not a complete result. `ambiguous_wait_target` or `unverified_wait_target`
+requires inspecting task history and result ownership; never resend the prompt.
+A compact summary is not the deliverable. Verify it yourself: inspect the changed files or diff, run
 the acceptance commands, compare with the request. DSH completing a turn is not
 acceptance. If it fell short, `dsh_followup` the same `taskId`.
 
-Then `dsh_release_workspace` for the claimed directory, and tell the user what
+Then call `dsh_release_workspace` for the claimed directory. It reads fresh
+Desktop inbox/jobs evidence even when status's mux queueDepth remains unknown.
+Success releases the bridge claim, preserving the session and history.
+If it reports
+`session_busy` or `workspace_state_unknown`, preserve the claim and explain the
+remaining evidence; do not bypass the guard. Tell the user what
 DSH produced, what you verified, and anything still open.
 
 ## Invariants

@@ -1,5 +1,27 @@
 # Compatibility: DSH Desktop Cowork private build
 
+## 2026-10-23 P3 supplement
+
+P3 implementation and SDK transport checks are complete: real elapsed 150/600
+seconds, exactly 1000 timer events, concurrent observers, isolated cancellation
+and progress. Both caller kinds completed a real Desktop task through a single
+SDK long wait (about 165/166 seconds), read full results and released normally.
+These are not native Codex/Claude UI capability claims. Production remains
+bounded pending native acceptance; see [long-wait.md](long-wait.md).
+The installer supports Codex tool_timeout_sec and Claude per-server timeout,
+with 960 seconds of client budget and field-only rollback.
+
+## 2026-10-23 addendum — Desktop 0.2.1-rc.2
+
+The installed Host's generated contracts and implementation were inspected for
+sequenced inbox projections and the read-only job/list rows stream. The adapter
+now reads these on release. A real MCP SDK smoke released two existing claims,
+then completed two exclusive-write tasks in the same directory with release
+between them. Another live smoke covered busy release refusal, independent
+wait cancellation and active-turn steering. The older matrix below is historical.
+These results do not establish native caller UI interruption or long-wait support.
+See `docs/acceptance.md` for current evidence and boundaries.
+
 This page records only combinations that were actually inspected on the target
 machine. Anything not listed here is **not** claimed to work.
 

@@ -444,7 +444,14 @@ export type DshSubagentAddress = {
   mode: "one-shot" | "continuable";
 };
 
+/** Fresh, body-free evidence for workspace release; absent fields remain unknown. */
+export interface DshWorkspaceState {
+  queue: { known: boolean; pending: number; asOfSeq?: number };
+  jobs: { known: boolean; active: number };
+}
+
 export interface DshApi {
+  sessionWorkspaceState?(sessionId: string, signal?: AbortSignal): Promise<DshWorkspaceState>;
   hostDescribe(signal?: AbortSignal): Promise<DshUnaryResult<DshHostDescription>>;
   sessionList(signal?: AbortSignal): Promise<DshUnaryResult<z.infer<typeof dshSessionListValueSchema>>>;
   sessionCreate(

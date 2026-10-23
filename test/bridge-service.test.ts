@@ -106,9 +106,14 @@ test("delegate validates cwd, never passes model, stays detached, and followup p
     assert.deepEqual(followups.map((call) => (call.payload as { mode: string }).mode), ["queue", "steer"]);
     assert.deepEqual(followups.map((call) => (call.payload as { sessionId: string }).sessionId), ["root-session", "root-session"]);
 
+    await assert.rejects(service.releaseWorkspace(delegated.taskId), (e: unknown) => e instanceof BridgeCapabilityError && e.code === "session_busy");
+    connection.lineage[0]!.running = false;
+    await ledger.append(delegated.taskId, { sourceSessionId: "root-session", origin: "root", type: "session/event", raw: { type: "session/event", sessionId: "root-session", event: { type: "turn/end", seq: 1, data: { reason: { kind: "completed" } } } } });
+    connection.queue.known = true;
+    connection.jobs.known = true;
     const released = await service.releaseWorkspace(delegated.taskId);
     assert.equal(released.sessionClosedByRelease, false);
-    assert.equal(released.sessionExistence, "not_checked");
+    assert.equal(released.sessionExistence, "verified");
     await assert.rejects(
       () => service.continueTask(delegated.taskId, "after release", "queue"),
       (error: unknown) => error instanceof BridgeCapabilityError && error.code === "workspace_claim_missing",

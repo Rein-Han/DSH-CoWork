@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -136,6 +136,18 @@ describe("setup-desktop plan", () => {
 
       const written = await readFile(join(dir, ".codex", "config.toml"), "utf8");
       assert.match(written, /\[mcp_servers\.dsh_desktop\]/u);
+      const skillDir = join(dir, ".agents", "skills", "codex-dsh-desktop");
+      await writeFile(join(skillDir, "SKILL.md"), "local old skill", "utf8");
+      await applyPlan({ ...second, options: { ...second.options, apply: true } });
+      const backups = (await readdir(skillDir)).filter(name => name.startsWith("SKILL.md.bak-dsh-desktop-cowork-"));
+      assert.equal(backups.length, 1);
+      assert.equal(await readFile(join(skillDir, backups[0]!), "utf8"), "local old skill");
+      const third = await buildPlan({ ...second.options, apply: true, dryRun: false });
+      assert.equal((await applyPlan(third)).changed.length, 0);
+
+      const stale = await buildPlan({ ...second.options, apply: true, dryRun: false, replace: true, entry: "changed-entry.js" });
+      await writeFile(join(dir, ".codex", "config.toml"), written + "# user edited after preview\n", "utf8");
+      await assert.rejects(applyPlan(stale), /changed after planning/);
     } finally {
       delete process.env.DSH_CONNECTION_FILE;
       await rm(dir, { recursive: true, force: true });

@@ -1,5 +1,40 @@
 # Acceptance matrix — DSH Desktop Cowork private build
 
+## 2026-10-23 P3 supplement
+
+- Strict build PASS; portable full regression **293 PASS / 0 FAIL**, excluding
+  the same six Windows symlink cases. Eight P3 tests add incremental ledger,
+  progress, cancellation, configuration rollback and resource matrix coverage.
+- Final real elapsed SDK fixture: 150 seconds and 600013ms; exactly 1000
+  ordinary events; each observer uses one terminal call; all observers/timers
+  settle. Initial interval-drift fixture emitted only 991 events and is superseded.
+- Real Host, SDK clients: dsh_47fcd7283933 (codex), dsh_2f80b76cfbf3
+  (claude-code), both complete result/release PASS in fresh isolated bridge homes.
+- Evidence: parent `analysis/supervision-fix-v2/2026-10-23-p3`; native UI gates
+  remain pending. [long-wait.md](long-wait.md) documents the independent timer MCP,
+  exact client acceptance, configuration and rollback. Keep production bounded
+  until the applicable client scenario passes; P2 unverified cases remain below.
+
+## 2026-10-23 P2 supplement
+
+- Product build PASS; portable regression 285 PASS, 0 FAIL, with the same six
+  Windows symlink-permission cases excluded. Old test TypeScript diagnostics
+  remain; the strict product build is checked separately.
+- Desktop 0.2.1-rc.2 live MCP SDK: two old claims released with actual inbox/jobs
+  evidence; two consecutive writes in one directory completed and released;
+  canceling one observer preserved the task and second observer; active steer
+  returned STEER_OK; busy release was refused. No claim/ledger was deleted by hand.
+- Fakes default queue/jobs to unknown. Desktop release tests use the actual
+  adapter's wire parser. Real Host verification is recorded separately from mocks.
+- Evidence in the parent workspace: `analysis/supervision-fix-v2/2026-10-23`;
+  detailed scope: `DSH-CoWork-P2-Delivery-2026-10-23.md`.
+- P2 native interaction/descendant and explicit task-cancel live scenarios still
+  need evidence. P3 native long waits/background/UI interruption remain unverified.
+  Keep bounded=30. Existing clients need reload for this build and updated skills.
+
+The original matrix below records the earlier installation environment, not the
+current live-verification status.
+
 Environment: Windows 10.0.26200 x64 · DeepSeek Harness Desktop **0.2.0-rc.2**
 (Electron 44.0.0, host protocol 4) · bridge Node **24.21.0** · Codex Desktop and
 Claude Code installed · execution environment: DSH Desktop agent session with the
