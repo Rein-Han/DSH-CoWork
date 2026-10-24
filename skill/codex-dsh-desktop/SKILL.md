@@ -14,6 +14,26 @@ running DSH Desktop Host. It never starts a Host, never installs another
 connector, and never opens a second channel "just this once" — if the tools are
 missing, read the installation diagnostic and tell the user.
 
+## Role boundary and delegation size
+
+- The Main agent is the **Principal Agent and Tech Lead**: it owns requirements,
+  architecture, technical decisions, sensitive approvals, cross-cutting
+  integration judgment, review, and final acceptance.
+- **DSH is the default engineering Worker** for independently executable bounded
+  slices: routine implementation, refactoring, tests, lint/type/test repair,
+  long-log analysis, and corrections from Main-agent review.
+- For nontrivial engineering, decide the **delegation size** explicitly and
+  delegate those slices by default with objective, workspace, constraints,
+  evidence, and completion condition. Do not self-implement merely because DSH
+  is optional or only allowed rather than required.
+- Keep **small tasks** local only when delegation and **handoff cost** clearly
+  exceeds doing them directly. Never generalize that exception into avoiding all
+  engineering delegation. Read-only probes verify behavior; they do not replace it.
+- Routine implementation and test repair suit the inherited **Flash** worker
+  route. Architecture, difficult debugging, high-risk changes, and ambiguous
+  decisions belong to the high-intelligence Main agent or a user-selected **Pro**
+  route in DSH Desktop. `modelPolicy=inherit` remains mandatory; never switch models.
+
 ## First contact
 
 1. `dsh_host_status` — confirm `reachable`, which adapter and protocol family

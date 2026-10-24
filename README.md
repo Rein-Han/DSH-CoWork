@@ -122,6 +122,8 @@ ZCode、Kimi Code、Kimi Work 均使用 `terminal/compact` 和最多 30 秒的�
 
 > 把这个任务交给 DSH：修复登录页提交失败的问题，只改登录相关代码和测试。做完你检查改动和测试，再告诉我结果。
 
+- 主 agent 是 Principal Agent / Tech Lead，负责需求、架构、跨领域集成判断和最终验收；DSH 是默认工程 Worker，承担可独立执行的实现、重构、测试和修复切片。小任务仅在委派与交接成本明显更高时才留在主 agent，不能因此回避所有工程委派。
+- Flash/Pro 只作为实施与架构的分工指引：实现和测试修复适合当前继承的 Flash 执行路线，复杂决策保留给高智力主 agent 或由用户在 Desktop 选择 Pro。桥接始终保持 `modelPolicy=inherit`，不会自动切换模型。
 - 可以让调用方使用对应的 skill，也可以显式调用：ZCode 里输入 `/zcode-dsh-desktop`，Claude Code 里输入 `/claude-dsh-desktop`，Codex 里输入 `$codex-dsh-desktop`，Kimi Code 里输入 `/skill:kimi-code-dsh-desktop`。
 - 新对话同时传 `projectRoot`（调用方当前项目根）和 `cwd`（请求任务目录）。精确匹配的已有 DSH 项目必须复用；不存在时只在该项目根创建。省略 `projectRoot` 的旧调用会复用最近已有父项目，没有时才以 `cwd` 创建。调用方名称不影响项目选择。
 - Desktop 0.2.1-rc.2 不允许 `workspaceId + cwd` 同时创建会话，选择项目后实际 session cwd 和 bridge claim 都是项目根；子目录只作为 prompt 中的任务范围，不是沙箱。返回的 `desktopWorkspace` 包含 `workspaceId/path/created/resolution/requestedCwd/sessionCwd`，可用于核对归属。

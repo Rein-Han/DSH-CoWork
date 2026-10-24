@@ -24,6 +24,29 @@ fail; the server cannot certify a caller UI from its environment.
   stores coordination metadata. It is not a second model runtime and never owns
   a conversation body.
 
+## Delegation boundary and size
+
+- The **Main agent is the Principal Agent and Tech Lead**. It owns requirement
+  interpretation, architecture, technical decisions, sensitive approvals,
+  cross-cutting integration judgment, review, and final acceptance.
+- **DSH is the default engineering Worker** for independently executable bounded
+  slices: routine implementation, refactoring, tests, lint/type/test repair,
+  long-log analysis, and corrections requested by the Main agent's review.
+- For nontrivial engineering, decide the **delegation size** explicitly. Give each
+  slice an objective, workspace, constraints, expected evidence, and completion
+  condition, then delegate it by default. Keep cross-slice decisions and
+  integration judgment in the Main agent; do not self-implement merely because
+  DSH is optional or only allowed rather than required.
+- Keep **small tasks** in the Main agent only when the delegation and
+  **handoff cost** clearly exceeds doing them locally. This exception must not
+  become a blanket reason to avoid engineering delegation. Read-only connectivity
+  or grouping probes are acceptance tools, not a substitute for implementation.
+- Routine implementation and test repair suit the inherited **Flash** worker
+  route. Architecture, difficult debugging, high-risk changes, and ambiguous
+  decisions belong to the high-intelligence Main agent or a user-selected **Pro**
+  route in DSH Desktop. These are role guidelines only: `modelPolicy=inherit`
+  remains mandatory and the bridge never switches models automatically.
+
 ## Three session paths
 
 1. **Same known task** — keep the exact `taskId` from the earlier call. Read the

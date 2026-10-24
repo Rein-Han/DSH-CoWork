@@ -543,6 +543,28 @@ describe("caller skills share one semantics contract", () => {
       }
     }
   });
+
+  it("all caller skills preserve explicit Worker and delegation-size guidance", async () => {
+    const workerRules = [
+      "Principal Agent|Tech Lead",
+      "Worker",
+      "routine implementation",
+      "delegation size|委派规模",
+      "handoff cost",
+      "small tasks",
+      "integration judgment|跨切片决策与集成判断",
+      "Flash",
+      "Pro",
+      "modelPolicy=inherit",
+    ];
+    for (const [dir] of callerSkills) {
+      const text = await readFile(new URL(`${dir}/SKILL.md`, ROOT), "utf8");
+      for (const rule of workerRules) {
+        assert.match(text, new RegExp(rule, "iu"), `${dir} is missing ${rule}`);
+      }
+      assert.match(text, /read-only.*(?:not a substitute|do not replace)|只读.*不能替代/iu);
+    }
+  });
 });
 
 

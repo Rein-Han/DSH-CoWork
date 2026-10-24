@@ -17,6 +17,20 @@ description: 在 ZCode 中通过 dsh_desktop MCP 将任务交给本机正在运�
 本接入只启用 bounded，单次最多 30 秒；不要设置 long 或请求 900 秒。
 Kimi/ZCode 的原生后台、插话及长调用尚未验收，不能根据 SDK 成功推断已支持。
 
+## 角色边界与委派规模
+
+- 主 agent 是 **Principal Agent / Tech Lead**，负责需求、架构、技术决策、敏感审批、
+  cross-cutting integration judgment、review 和最终验收。
+- **DSH 是默认工程 Worker**，承担可独立执行的 bounded 切片：routine implementation、
+  refactoring、tests、lint/type/test repair、长日志分析和主 agent review 后的修正。
+- 非简单工程先明确 **delegation size**，为每个切片给出目标、范围、约束、证据和完成条件，
+  默认交给 DSH；跨切片决策与集成判断留在主 agent。不得只因 DSH 可选或仅被允许调用就自行实施。
+- **small tasks** 仅在 delegation and **handoff cost** 明显高于本地完成成本时留在主 agent，
+  不得把这一例外泛化为回避所有工程委派。只读连通/分组探针是验收工具，不能替代工程实施。
+- routine implementation 和测试修复适合继承的 **Flash** 执行路线；架构、复杂调试、高风险或
+  含糊决策保留给高智力主 agent，或由用户在 Desktop 选择 **Pro**。`modelPolicy=inherit`
+  必须保持，桥接不会自动切换模型。
+
 ## 派发与续接
 
 - 新任务用 dsh_delegate，必须同时传 projectRoot（调用方当前项目根）、真实绝对 cwd
