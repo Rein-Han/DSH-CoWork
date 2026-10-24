@@ -1,11 +1,27 @@
 # Compatibility: DSH Desktop Cowork private build
 
+## 2026-10-24 Desktop project workspace resolution
+
+New Desktop sessions no longer call `workspace/create` for every requested cwd.
+The adapter reads a complete `workspace/follow` baseline, reuses an exact
+`projectRoot` or the nearest existing ancestor, and creates only an explicitly
+selected new project root. Missing or malformed baselines, duplicate canonical
+identities, and mismatched creation results fail before session creation; there
+is no fallback to per-cwd project creation.
+
+Host 0.2.1-rc.2 rejects `workspaceId + cwd` in `session/create`: a workspace-bound
+session always uses `workspace.path`. The actual session cwd and bridge claim
+therefore use the selected project root, while the requested subdirectory remains
+prompt scope rather than a sandbox. `desktopWorkspace` exposes
+`workspaceId/path/created/resolution/requestedCwd/sessionCwd` for verification.
+Existing sessions are not migrated and legacy RC6 behavior is unchanged. See
+`docs/acceptance.md` for current automated and live evidence boundaries.
+
 ## 2026-10-24 local ZCode / Kimi integration
 
-The local source now integrates the reviewed ZCode branch on top of P1–P3.
-New Desktop sessions register/reuse their cwd through workspace/create and
-carry its workspaceId into session/create; a mismatched returned path is refused.
-Existing sessions are not moved. Queue/jobs release evidence is preserved.
+The local source integrates the reviewed ZCode branch on top of P1–P3.
+Its initial per-cwd workspace registration is superseded by the project resolution
+above; queue/jobs release evidence is preserved and existing sessions are not moved.
 
 ZCode and Kimi Code have user/project configuration installers. Kimi Code uses
 KIMI_CODE_HOME (default ~/.kimi-code), not the obsolete ~/.kimi location.

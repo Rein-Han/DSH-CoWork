@@ -64,15 +64,19 @@ npm run setup-desktop -- --caller kimi-work --output .\artifacts\kimi-work-dsh-d
 
 两套 skill 保存 taskId、回执的 targetStartAfterCursor 和 nextCursor，明确选择 `terminal/compact`，单次最多 30 秒。普通事件不逐条返回给调用模型。安装器和运行时均拒绝 `long`，直到完成各客户端长调用、中断、并发和结果回收验证。
 
-审批/提问由用户在 DSH Desktop 处理；观察超时不取消 DSH、不重派任务。取完整结果、核对归属并验收后正常释放目录。新会话使用 cwd 对应的 DSH 项目。日常多客户端应共用 bridge home，以共享目录占用；隔离 home 仅用于独立验收目录。
+新任务必须同时传 `projectRoot`（调用方当前项目根）和 `cwd`（请求任务目录），且 `projectRoot` 是 `cwd` 自身或祖先。显式 `projectRoot` 只精确复用该根的已有 workspace，没有则只在该根创建；省略时才复用 `cwd` 本身或最近祖先的已有 workspace，都没有才以 `cwd` 创建。已有会话不迁移，其他 legacy 行为不变。调用方名字只用于归因，不影响项目选择；独立 worktree 未明确扩大范围时不得归入另一个项目。
+
+Host 0.2.1-rc.2 不允许创建会话时同时传 `workspaceId` 和 `cwd`，选择 workspace 后实际 session cwd 强制为 `workspace.path`。因此子目录任务的真实会话 cwd 和 bridge claim 都提升到项目根，输入 `cwd` 仍放在 prompt 中作为任务范围，不是沙箱。核对 `delegated.desktopWorkspace`：`path/sessionCwd` 是 canonical 项目根，`requestedCwd` 是 canonical 请求目录，`resolution` 为 `exact|ancestor|created`，并确认 `workspaceClaim.cwd==sessionCwd==path`。证据缺失或不符时保留任务和回执并报告，不重派。
+
+审批/提问由用户在 DSH Desktop 处理；观察超时不取消 DSH、不重派任务。取完整结果、核对归属并验收后正常释放目录。日常多客户端应共用 bridge home，以共享目录占用；隔离 home 仅用于独立验收目录。
 
 SDK 检查（非原生客户端 UI 验收）：
 
 ```powershell
-node scripts/verify-caller.mjs --caller kimi-code --project 'C:\work\my-project'
-node scripts/verify-caller.mjs --caller kimi-work --project 'C:\work\my-project' --config .\artifacts\kimi-work-dsh-desktop\mcp-settings.json
+node scripts/verify-caller.mjs --caller kimi-code --project 'C:\work\my-project' --cwd 'C:\work\my-project\packages\demo'
+node scripts/verify-caller.mjs --caller kimi-work --project 'C:\work\my-project' --cwd 'C:\work\my-project\packages\demo' --config .\artifacts\kimi-work-dsh-desktop\mcp-settings.json
 ```
 
-Code 项目级配置需加 `--config 'C:\work\my-project\.kimi-code\mcp.json'`。脚本派发一个只读标记任务，消耗少量 DSH 模型额度，保存 `<project>/artifacts/dsh-verification/<taskId>.json`。180 秒预算用尽或待交互后，处理完可用相同参数加 `--receipt '<receipt-path>'` 继续，不重复派发。自定义 bridge home 必须保持一致。
+`--project` 始终表示项目根；可选 `--cwd` 表示请求任务目录，默认等于 `--project`。Code 项目级配置需加 `--config 'C:\work\my-project\.kimi-code\mcp.json'`。脚本派发一个只读标记任务，消耗少量 DSH 模型额度，校验上述项目证据，并把 `project`、`requestedCwd` 和 `desktopWorkspace` 保存到 `<project>/artifacts/dsh-verification/<taskId>.json`。180 秒预算用尽或待交互后，处理完可用相同参数加 `--receipt '<receipt-path>'` 继续，不重复派发；没有新增字段的旧回执仍可恢复。自定义 bridge home 必须保持一致。
 
-各原生客户端最终分别验收：工具可见、skill 加载、派发与项目归属、等待不刷屏、完整结果、正常释放、同目录再次派写任务、用户中断/审批。SDK PASS 只证明桥接和 Host 路径，不证明界面或账号已开放功能。
+各原生客户端最终分别验收：工具可见、skill 加载、派发与项目归属及 workspace/claim 证据、等待不刷屏、完整结果、正常释放、同目录再次派写任务、用户中断/审批。SDK PASS 只证明桥接和 Host 路径及返回证据，不证明原生界面或账号已开放功能。

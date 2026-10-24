@@ -127,6 +127,56 @@ test("delegate validates cwd, never passes model, stays detached, and followup p
   }
 });
 
+test("delegate returns Desktop project evidence and claims the actual session project root", async () => {
+  const home = await mkdtemp(join(tmpdir(), "codex-dsh-project-root-"));
+  const bridgeHome = join(home, "bridge");
+  const projectRoot = join(home, "project");
+  const requestedCwd = join(projectRoot, "child");
+  const unrelated = join(home, "unrelated");
+  try {
+    await mkdir(requestedCwd, { recursive: true });
+    await mkdir(bridgeHome, { recursive: true });
+    await mkdir(unrelated, { recursive: true });
+    const canonicalRoot = await realpath(projectRoot);
+    const canonicalCwd = await realpath(requestedCwd);
+    const api = new FakeDshApi();
+    api.nextDesktopWorkspace = {
+      workspaceId: "workspace-1",
+      path: canonicalRoot,
+      created: false,
+      resolution: "exact",
+      requestedCwd: canonicalCwd,
+      sessionCwd: canonicalRoot,
+    };
+    const tasks = new TaskStore(bridgeHome);
+    const ledger = new EventLedger(bridgeHome);
+    const connection = new FakeConnection(ledger);
+    const service = new BridgeService(config(bridgeHome), api, tasks, connection, ledger);
+
+    const delegated = await service.delegate({ prompt: "Implement only the child scope", cwd: requestedCwd, projectRoot });
+    assert.deepEqual(delegated.desktopWorkspace, api.nextDesktopWorkspace);
+    assert.equal(delegated.workspaceClaim.cwd, canonicalRoot);
+    assert.equal(delegated.workspaceClaimSemantics.controlsDshSandbox, false);
+    const create = api.calls.find((call) => call.method === "session.create");
+    assert.deepEqual(create?.payload, { cwd: canonicalCwd, projectRoot: canonicalRoot });
+    const persisted = await new WorkspaceClaimStore(bridgeHome).get(delegated.taskId);
+    assert.equal(persisted?.cwd, canonicalRoot);
+
+    const beforeInvalid = api.calls.length;
+    await assert.rejects(
+      () => service.delegate({ prompt: "must not create", cwd: requestedCwd, projectRoot: unrelated }),
+      /projectRoot must be cwd itself or one of its ancestors/,
+    );
+    await assert.rejects(
+      () => service.delegate({ prompt: "must not create", cwd: requestedCwd, projectRoot: join(home, "missing") }),
+      /projectRoot does not exist/,
+    );
+    assert.equal(api.calls.length, beforeInvalid);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("findSessions returns bounded root metadata without history or raw projections", async () => {
   const home = await mkdtemp(join(tmpdir(), "codex-dsh-service-"));
   try {

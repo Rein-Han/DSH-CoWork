@@ -31,12 +31,29 @@ missing, read the installation diagnostic and tell the user.
 `dsh_delegate` with:
 
 - `prompt`: the structured handoff (see below);
-- `cwd`: the real project directory;
+- `projectRoot`: the caller's current project root;
+- `cwd`: the real requested task directory;
 - `title`: a short display title;
 - `waitSeconds`: `0` (detach, then supervise explicitly);
 - `workspaceMode`: `"exclusive-write"` (default) when this task may modify files, `"read-only"` when it must not.
 
+Always pass both `projectRoot` and `cwd`; the root must be `cwd` itself or its
+ancestor. An explicit root reuses only an exact existing workspace or creates
+one at that root, never a higher-level workspace. On Host 0.2.1-rc.2, selecting
+a workspace forces the actual session cwd to `workspace.path`, so a subdirectory
+task's session cwd and bridge claim are promoted to the project root. Keep the
+input `cwd` in the prompt as task scope, not as a sandbox. Do not assign an
+independent worktree to another project without explicitly widening the scope.
+The caller name is attribution only and does not affect project selection.
+
 Remember the returned `taskId` and `waitTarget.targetStartAfterCursor`.
+Check `delegated.desktopWorkspace`: `workspaceId` is present, `created` is a
+boolean, `resolution` is `exact`, `ancestor`, or `created`, `path` and
+`sessionCwd` equal the canonical `projectRoot`, and `requestedCwd` equals the
+canonical `cwd`. Also require
+`workspaceClaim.cwd == desktopWorkspace.sessionCwd == desktopWorkspace.path`.
+If evidence is missing or inconsistent, preserve the task and receipt, report
+the attribution problem, and never re-delegate the same work.
 For a queued follow-up, replace the wait target with the new receipt's target;
 steering keeps the current target. Never retry a prompt whose outcome is unknown.
 
@@ -55,9 +72,10 @@ pick by title.
 
 ## Handoff content
 
-Objective; deliverable; `cwd`; what may be modified; what is already done;
-relevant paths; constraints and versions; the acceptance commands; the shape of
-the answer you need. No chat transcripts, no internal reasoning, no secrets.
+Objective; deliverable; `projectRoot`; the requested `cwd` as task scope; what
+may be modified; what is already done; relevant paths; constraints and versions;
+the acceptance commands; the shape of the answer you need. No chat transcripts,
+no internal reasoning, no secrets.
 
 ## While it runs
 

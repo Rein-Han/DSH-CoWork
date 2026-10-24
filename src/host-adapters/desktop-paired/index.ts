@@ -157,7 +157,7 @@ export class PairedHostAdapter implements HostAdapter {
     return this.run((adapter) => adapter.sessionList(signal));
   }
 
-  sessionCreate(payload: { cwd: string; agentPreset?: string; sessionId?: string }, signal?: AbortSignal) {
+  sessionCreate(payload: { cwd: string; projectRoot?: string; agentPreset?: string; sessionId?: string }, signal?: AbortSignal) {
     return this.run((adapter) => adapter.sessionCreate(payload, signal));
   }
 

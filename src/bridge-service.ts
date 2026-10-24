@@ -1,5 +1,5 @@
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import type { BridgeConfig } from "./config.js";
 import { EventLedgerError } from "./event-ledger.js";
@@ -44,6 +44,7 @@ import { waitWithPolicy, compactWait, type WaitOptions } from "./wait-policy.js"
 export interface DelegateInput {
   prompt: string;
   cwd: string;
+  projectRoot?: string;
   agentPreset?: string;
   title?: string;
   waitSeconds?: number;
@@ -1013,6 +1014,22 @@ export class BridgeService {
     });
     const cwdStat = await stat(cwd);
     if (!cwdStat.isDirectory()) throw new Error(`cwd is not a directory: ${cwd}`);
+    let projectRoot: string | undefined;
+    if (input.projectRoot !== undefined) {
+      if (!isAbsolute(input.projectRoot)) throw new Error("projectRoot must be an absolute path");
+      const requestedProjectRoot = resolve(input.projectRoot);
+      projectRoot = await realpath(requestedProjectRoot).catch((error: unknown) => {
+        throw new Error(`projectRoot does not exist or cannot be resolved: ${requestedProjectRoot}`, { cause: error });
+      });
+      const rootStat = await stat(projectRoot);
+      if (!rootStat.isDirectory()) throw new Error(`projectRoot is not a directory: ${projectRoot}`);
+      const rootKey = process.platform === "win32" ? projectRoot.toLowerCase() : projectRoot;
+      const cwdKey = process.platform === "win32" ? cwd.toLowerCase() : cwd;
+      const child = relative(rootKey, cwdKey);
+      if (child !== "" && (child.startsWith("..") || isAbsolute(child))) {
+        throw new Error("projectRoot must be cwd itself or one of its ancestors");
+      }
+    }
     const waitSeconds = input.waitSeconds ?? 0;
     this.validateWaitSeconds(waitSeconds);
     this.assertInheritedRoute(input);
@@ -1039,7 +1056,11 @@ export class BridgeService {
 
     await this.api.hostDescribe();
     const agentPreset = input.agentPreset?.trim() || this.config.defaultAgentPreset;
-    const created = await this.api.sessionCreate({ cwd, ...(agentPreset === undefined ? {} : { agentPreset }) });
+    const created = await this.api.sessionCreate({
+      cwd,
+      ...(projectRoot === undefined ? {} : { projectRoot }),
+      ...(agentPreset === undefined ? {} : { agentPreset }),
+    });
 
     let task: TaskRecord;
     try {
@@ -1058,7 +1079,7 @@ export class BridgeService {
     let workspaceClaim;
     try {
       workspaceClaim = await this.claims.acquire({
-        canonicalCwd: cwd,
+        canonicalCwd: created.desktopWorkspace?.sessionCwd ?? cwd,
         taskId: task.taskId,
         sessionId: task.sessionId,
         mode: workspaceMode,
@@ -1213,6 +1234,7 @@ export class BridgeService {
           mode: this.config.hostMode,
           configuredBaseUrl: this.config.hostUrl,
         }).resolvedBaseUrl ?? this.config.hostUrl,
+      ...(created.desktopWorkspace === undefined ? {} : { desktopWorkspace: created.desktopWorkspace }),
       workspaceClaim,
       workspaceClaimSemantics: workspaceClaimSemantics(),
       ...(promptTrackingWarning === undefined ? {} : { coordinationWarning: promptTrackingWarning }),

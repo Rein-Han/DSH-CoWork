@@ -266,13 +266,15 @@ export function createMcpServer(service: BridgeService, options: McpServerOption
       "dsh_delegate",
       {
         description:
-          "Create a new root session in the user's running DSH Desktop and queue the initial prompt. Put a compact handoff in prompt (objective, deliverable, cwd, allowed changes, done work, focus paths, constraints, acceptance commands, expected answer) and tell DSH to read the focus paths first. The model, reasoning effort and agent preset are inherited from DSH Desktop; this tool takes no model parameters. Detached by default; poll with dsh_wait. workspaceMode is only a bridge-local cooperative claim and does not select or verify the DSH sandbox.",
-        inputSchema: delegateSchema.omit({ ...ROUTING_FIELDS, agentPreset: true }),
+          "Create a new root session in the user's running DSH Desktop and queue the initial prompt. Put a compact handoff in prompt (objective, deliverable, cwd, allowed changes, done work, focus paths, constraints, acceptance commands, expected answer) and tell DSH to read the focus paths first. Pass projectRoot for the caller's current project so its existing Desktop workspace is reused, or one is created only at that root. The selected workspace path becomes the actual session and claim cwd. The model, reasoning effort and agent preset are inherited from DSH Desktop; this tool takes no model parameters. Detached by default; poll with dsh_wait. workspaceMode is only a bridge-local cooperative claim and does not select or verify the DSH sandbox.",
+        inputSchema: delegateSchema.omit({ ...ROUTING_FIELDS, agentPreset: true }).extend({
+          projectRoot: z.string().min(1).optional().describe("Absolute current project root. Reuse its exact DSH workspace or create one only there; it must contain cwd. The selected workspace path becomes the actual session and claim cwd."),
+        }),
         annotations: writeOnce,
       },
-      async ({ prompt, cwd, title, waitSeconds, workspaceMode }) =>
+      async ({ prompt, cwd, projectRoot, title, waitSeconds, workspaceMode }) =>
         handled(() =>
-          service.delegate({ prompt, cwd, waitSeconds, workspaceMode, ...(title === undefined ? {} : { title }) }),
+          service.delegate({ prompt, cwd, waitSeconds, workspaceMode, ...(projectRoot === undefined ? {} : { projectRoot }), ...(title === undefined ? {} : { title }) }),
         ),
     );
   } else {

@@ -450,14 +450,23 @@ export interface DshWorkspaceState {
   jobs: { known: boolean; active: number };
 }
 
+export interface DshDesktopWorkspace {
+  workspaceId: string;
+  path: string;
+  created: boolean;
+  resolution: "exact" | "ancestor" | "created";
+  requestedCwd: string;
+  sessionCwd: string;
+}
+
 export interface DshApi {
   sessionWorkspaceState?(sessionId: string, signal?: AbortSignal): Promise<DshWorkspaceState>;
   hostDescribe(signal?: AbortSignal): Promise<DshUnaryResult<DshHostDescription>>;
   sessionList(signal?: AbortSignal): Promise<DshUnaryResult<z.infer<typeof dshSessionListValueSchema>>>;
   sessionCreate(
-    payload: { cwd: string; agentPreset?: string; sessionId?: string },
+    payload: { cwd: string; projectRoot?: string; agentPreset?: string; sessionId?: string },
     signal?: AbortSignal,
-  ): Promise<DshUnaryResult<z.infer<typeof dshSessionCreateValueSchema>>>;
+  ): Promise<DshUnaryResult<z.infer<typeof dshSessionCreateValueSchema> & { desktopWorkspace?: DshDesktopWorkspace }>>;
   sessionModels(sessionId: string, signal?: AbortSignal): Promise<DshUnaryResult<DshSessionModels>>;
   sessionSelectModel(
     payload: { sessionId: string; provider: string; model: string; reasoningEffort?: string },

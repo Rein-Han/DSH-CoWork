@@ -214,6 +214,14 @@ describe("desktop wire frames", () => {
 });
 
 describe("desktop-paired adapter", () => {
+  function workspace(workspaceId: string, path: string) {
+    return { workspaceId, path, title: path, sessionIds: [], createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" };
+  }
+
+  function baseline(items: Array<ReturnType<typeof workspace>>) {
+    return { type: "baseline", value: { items, archivedSessionIds: [], pinnedSessionIds: [] } };
+  }
+
   /** A fake generation that records every request it is asked to send. */
   function fakeSession(values: Record<string, unknown> = {}) {
     const calls: Array<{ endpoint: string; args: Record<string, unknown> }> = [];
@@ -226,8 +234,13 @@ describe("desktop-paired adapter", () => {
         if (value instanceof Error) throw value;
         return value ?? {};
       },
-      async *openStream() {
-        return;
+      async *openStream(endpoint: string, args: Record<string, unknown>) {
+        calls.push({ endpoint, args });
+        const value = values[endpoint];
+        if (value instanceof Error) throw value;
+        if (Array.isArray(value)) {
+          for (const item of value) yield { type: "item", streamId: "stream-1", value: item };
+        }
       },
       handshake: async () => "",
       dispose: () => undefined,
@@ -280,35 +293,115 @@ describe("desktop-paired adapter", () => {
     assert.deepEqual(fake.calls[0], { endpoint: "session/list", args: { _request: {} } });
   });
 
-  for (const created of [false, true]) {
-    it(`${created ? "registers" : "reuses"} the cwd workspace before creating its session`, async () => {
-      const cwd = "C:\\projects\\cowork";
+  it("reuses an exact projectRoot without creating a workspace or changing its path casing", async () => {
+    const existing = workspace("workspace-1", "C:\\Projects\\Cowork");
+    const projectRoot = "c:\\projects\\cowork";
+    const cwd = `${projectRoot}\\child`;
+    const { fake, adapter: instance } = adapter({
+      "workspace/follow": [baseline([existing])],
+      "session/create": { sessionId: "session-1", agentPreset: "default" },
+    });
+    const result = await instance.sessionCreate({ cwd, projectRoot, sessionId: "session-1", agentPreset: "default" });
+    assert.deepEqual(result.desktopWorkspace, {
+      workspaceId: "workspace-1", path: existing.path, created: false, resolution: "exact",
+      requestedCwd: cwd, sessionCwd: existing.path,
+    });
+    assert.deepEqual(fake.calls, [
+      { endpoint: "workspace/follow", args: {} },
+      { endpoint: "session/create", args: { request: { workspaceId: "workspace-1", sessionId: "session-1", agentPreset: "default" } } },
+    ]);
+  });
+
+  it("reuses the nearest existing ancestor without calling workspace/create", async () => {
+    const parent = workspace("parent", "C:\\projects");
+    const nested = workspace("nested", "C:\\projects\\cowork");
+    const cwd = "C:\\projects\\cowork\\child";
+    const { fake, adapter: instance } = adapter({
+      "workspace/follow": [baseline([parent, nested])],
+      "session/create": { sessionId: "session-1" },
+    });
+    const result = await instance.sessionCreate({ cwd });
+    assert.equal(result.desktopWorkspace.workspaceId, "nested");
+    assert.equal(result.desktopWorkspace.resolution, "ancestor");
+    assert.equal(result.desktopWorkspace.sessionCwd, nested.path);
+    assert.equal(result.desktopWorkspace.requestedCwd, cwd);
+    assert.deepEqual(fake.calls.map(call => call.endpoint), ["workspace/follow", "session/create"]);
+  });
+
+  for (const created of [true, false]) {
+    it(`${created ? "creates" : "deduplicates"} only an explicit new project root before session creation`, async () => {
+      const projectRoot = "C:\\projects\\cowork\\new-project";
+      const cwd = `${projectRoot}\\child`;
+      const parent = workspace("parent", "C:\\projects\\cowork");
+      const selected = workspace("selected", projectRoot);
       const { fake, adapter: instance } = adapter({
-        "workspace/create": { workspace: { workspaceId: "workspace-1", path: cwd }, created },
-        "session/create": { sessionId: "session-1", agentPreset: "default" },
+        "workspace/follow": [baseline([parent])],
+        "workspace/create": { workspace: selected, created },
+        "session/create": { sessionId: "session-1" },
       });
-      const result = await instance.sessionCreate({ cwd, sessionId: "session-1", agentPreset: "default" });
-      assert.equal(result.sessionId, "session-1");
-      assert.equal(result.agentPreset, "default");
+      const result = await instance.sessionCreate({ cwd, projectRoot });
+      assert.equal(result.desktopWorkspace.workspaceId, "selected");
+      assert.equal(result.desktopWorkspace.created, created);
+      assert.equal(result.desktopWorkspace.resolution, created ? "created" : "exact");
+      assert.equal(result.desktopWorkspace.sessionCwd, projectRoot);
+      assert.equal(result.desktopWorkspace.requestedCwd, cwd);
       assert.deepEqual(fake.calls, [
-        { endpoint: "workspace/create", args: { request: { path: cwd } } },
-        { endpoint: "session/create", args: { request: { workspaceId: "workspace-1", sessionId: "session-1", agentPreset: "default" } } },
+        { endpoint: "workspace/follow", args: {} },
+        { endpoint: "workspace/follow", args: {} },
+        { endpoint: "workspace/create", args: { request: { path: projectRoot } } },
+        { endpoint: "session/create", args: { request: { workspaceId: "selected" } } },
       ]);
     });
   }
 
-  it("does not create an ungrouped session when workspace registration fails or returns invalid data", async () => {
-    for (const value of [new Error("workspace unavailable"), { workspace: { workspaceId: "", path: "C:\\projects" }, created: false }]) {
-      const { fake, adapter: instance } = adapter({ "workspace/create": value });
-      await assert.rejects(() => instance.sessionCreate({ cwd: "C:\\projects" }));
-      assert.deepEqual(fake.calls.map(call => call.endpoint), ["workspace/create"]);
+  it("keeps the legacy cwd-only fallback when no ancestor exists", async () => {
+    const cwd = "C:\\projects\\new-project";
+    const selected = workspace("selected", cwd);
+    const { fake, adapter: instance } = adapter({
+      "workspace/follow": [baseline([])],
+      "workspace/create": { workspace: selected, created: true },
+      "session/create": { sessionId: "session-1" },
+    });
+    const result = await instance.sessionCreate({ cwd });
+    assert.equal(result.desktopWorkspace.resolution, "created");
+    assert.equal(result.desktopWorkspace.requestedCwd, cwd);
+    assert.equal(result.desktopWorkspace.sessionCwd, cwd);
+    assert.equal(fake.calls.filter(call => call.endpoint === "workspace/create").length, 1);
+  });
+
+  it("rejects an explicit projectRoot that does not contain cwd before any write", async () => {
+    const { fake, adapter: instance } = adapter({ "workspace/follow": [baseline([])] });
+    await assert.rejects(
+      () => instance.sessionCreate({ cwd: "C:\\other\\child", projectRoot: "C:\\projects\\cowork" }),
+      /projectRoot must be cwd itself or one of its ancestors/,
+    );
+    assert.deepEqual(fake.calls.map(call => call.endpoint), ["workspace/follow"]);
+  });
+
+  it("rejects duplicate canonical workspace identities before any write", async () => {
+    const first = workspace("first", "C:\\Projects\\Cowork");
+    const second = workspace("second", "c:\\projects\\cowork");
+    const { fake, adapter: instance } = adapter({ "workspace/follow": [baseline([first, second])] });
+    await assert.rejects(() => instance.sessionCreate({ cwd: "C:\\projects\\cowork" }), /duplicate workspace id or canonical path/);
+    assert.deepEqual(fake.calls.map(call => call.endpoint), ["workspace/follow"]);
+  });
+
+  it("fails closed on missing, malformed, or failed workspace baselines", async () => {
+    for (const value of [[], [{ type: "upsert", value: {} }], new Error("workspace unavailable")]) {
+      const { fake, adapter: instance } = adapter({ "workspace/follow": value });
+      await assert.rejects(() => instance.sessionCreate({ cwd: "C:\\projects\\cowork" }));
+      assert.deepEqual(fake.calls.map(call => call.endpoint), ["workspace/follow"]);
     }
   });
 
-  it("refuses a workspace whose directory differs from the bridge claim cwd", async () => {
-    const { fake, adapter: instance } = adapter({ "workspace/create": { workspace: { workspaceId: "wrong", path: "C:\\other" }, created: false } });
-    await assert.rejects(() => instance.sessionCreate({ cwd: "C:\\projects" }), /different directory/);
-    assert.deepEqual(fake.calls.map(call => call.endpoint), ["workspace/create"]);
+  it("refuses a created workspace whose canonical project root differs", async () => {
+    const wrong = workspace("wrong", "C:\\other");
+    const { fake, adapter: instance } = adapter({
+      "workspace/follow": [baseline([])],
+      "workspace/create": { workspace: wrong, created: true },
+    });
+    await assert.rejects(() => instance.sessionCreate({ cwd: "C:\\projects\\cowork" }), /different canonical project root/);
+    assert.deepEqual(fake.calls.map(call => call.endpoint), ["workspace/follow", "workspace/follow", "workspace/create"]);
   });
 
   it("passes the prompt requestId through so a retry can be de-duplicated", async () => {
@@ -399,21 +492,27 @@ describe("paired configuration", () => {
 });
 
 describe("caller skills share one semantics contract", () => {
+  const callerSkills = [
+    ["skill/codex-dsh-desktop", "codex-dsh-desktop"],
+    ["skill/claude-dsh-desktop", "claude-dsh-desktop"],
+    ["skill/zcode-dsh-desktop", "zcode-dsh-desktop"],
+    ["skill/kimi-code-dsh-desktop", "kimi-code-dsh-desktop"],
+    ["skill/kimi-work-dsh-desktop", "kimi-work-dsh-desktop"],
+  ] as const;
   const requiredRules = [
-    "inherit",
-    "single writer|one writer",
+    "inherit|沿用|继承",
+    "single writer|one writer|一个写入者",
     "30 seconds|30 秒|30s",
-    "acceptance|accept",
-    "approval",
+    "acceptance|accept|验收",
+    "approval|审批",
     "taskId",
     "release_workspace",
+    "projectRoot",
+    "sessionCwd",
   ];
 
-  it("both skills declare their own name and the dsh_desktop server only", async () => {
-    for (const [dir, name] of [
-      ["skill/codex-dsh-desktop", "codex-dsh-desktop"],
-      ["skill/claude-dsh-desktop", "claude-dsh-desktop"],
-    ] as const) {
+  it("all caller skills declare their own name and the dsh_desktop server only", async () => {
+    for (const [dir, name] of callerSkills) {
       const text = await readFile(new URL(`${dir}/SKILL.md`, ROOT), "utf8");
       assert.match(text, new RegExp(`^---\\nname: ${name}$`, "mu"));
       assert.match(text, /dsh_desktop/u);
@@ -421,7 +520,7 @@ describe("caller skills share one semantics contract", () => {
     }
   });
 
-  it("neither skill points at the other skill's files", async () => {
+  it("neither original skill points at the other skill's files", async () => {
     const codex = await readFile(new URL("skill/codex-dsh-desktop/SKILL.md", ROOT), "utf8");
     const claude = await readFile(new URL("skill/claude-dsh-desktop/SKILL.md", ROOT), "utf8");
     assert.doesNotMatch(codex, /claude-dsh-desktop\//u);
@@ -430,14 +529,14 @@ describe("caller skills share one semantics contract", () => {
 
   it("every skill copy of the semantics page is byte-identical to the canonical page", async () => {
     const canonical = await readFile(new URL("docs/cowork-semantics.md", ROOT), "utf8");
-    for (const dir of ["skill/codex-dsh-desktop", "skill/claude-dsh-desktop"]) {
+    for (const [dir] of callerSkills) {
       const copy = await readFile(new URL(`${dir}/references/cowork-semantics.md`, ROOT), "utf8");
       assert.equal(copy, canonical, `${dir} copy drifted from docs/cowork-semantics.md`);
     }
   });
 
-  it("both skills state every required rule", async () => {
-    for (const dir of ["skill/codex-dsh-desktop", "skill/claude-dsh-desktop"]) {
+  it("all caller skills state every required rule", async () => {
+    for (const [dir] of callerSkills) {
       const text = await readFile(new URL(`${dir}/SKILL.md`, ROOT), "utf8");
       for (const rule of requiredRules) {
         assert.match(text, new RegExp(rule, "iu"), `${dir} is missing ${rule}`);

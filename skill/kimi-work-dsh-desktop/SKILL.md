@@ -19,11 +19,21 @@ Kimi/ZCode 的原生后台、插话及长调用尚未验收，不能根据 SDK �
 
 ## 派发与续接
 
-- 新任务用 dsh_delegate：真实绝对 cwd、简短 title、waitSeconds:0。
+- 新任务用 dsh_delegate，必须同时传 projectRoot（调用方当前项目根）、真实绝对 cwd
+  （请求任务目录）、简短 title、waitSeconds:0。projectRoot 必须是 cwd 自身或祖先。
+  显式 projectRoot 只精确复用该根的已有 workspace，没有则只在该根创建，不改用更上层项目。
   修改文件用 exclusive-write，只读用 read-only。它是 bridge 协作约定，不是 Host 沙箱。
-- prompt 包括目标、交付物、已完成工作、相关路径、允许修改范围、约束与验收命令。
+- Host 0.2.1-rc.2 选择 workspace 后，实际 session cwd 强制为 workspace.path；
+  子目录任务的真实会话 cwd 和 bridge claim 都提升到项目根。输入 cwd 仍写进 prompt
+  作为任务范围，不是沙箱。独立 worktree 未明确扩大范围时不得归入另一个项目；
+  调用方名字只用于归因，不影响项目选择。
+- prompt 包括目标、交付物、projectRoot、请求 cwd、已完成工作、相关路径、允许修改范围、约束与验收命令。
   不传聊天全文、秘密或无关大段文件。模型、推理强度和 preset 继承 Desktop。
-- 保存 taskId 和 receipt.waitTarget.targetStartAfterCursor。
+- 保存 taskId 和 receipt.waitTarget.targetStartAfterCursor。核对 delegated.desktopWorkspace：
+  workspaceId 存在、created 为布尔值、resolution 为 exact|ancestor|created；
+  path/sessionCwd 均为 canonical projectRoot，requestedCwd 为 canonical cwd，且
+  workspaceClaim.cwd==desktopWorkspace.sessionCwd==desktopWorkspace.path。
+  证据缺失或不符时保留 taskId/receipt 并报告归属未验证，不得重派同一任务。
 - 续同一任务先 dsh_status，再 dsh_followup；queue 后换成新 receipt 的目标，steer 保持当前目标。
   不自动把失效 steer 改成 queue，不重试结果不明的提示发送。
 - 用户指定已有 Desktop 会话时先 dsh_find_sessions；用唯一目标的 sessionId 和返回前置条件

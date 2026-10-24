@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import type { AuthSession } from "../../desktop/auth-session.js";
 import { attachDshUnaryMetadata } from "../../dsh-types.js";
@@ -15,6 +15,7 @@ import type {
   DshSubagentAddress,
   DshSubagentListValue,
   DshUnaryResult,
+  DshDesktopWorkspace,
   DshWorkspaceState,
 } from "../../dsh-types.js";
 import {
@@ -33,8 +34,9 @@ import {
   workspaceInboxSchema,
   workspaceJobsSchema,
   workspaceCreateResultSchema,
+  workspaceFollowBaselineSchema,
 } from "./protocol.js";
-import type { SessionEvent } from "./protocol.js";
+import type { DesktopWorkspace, SessionEvent } from "./protocol.js";
 
 /**
  * Version table of Desktop Host releases this bridge implements.
@@ -83,6 +85,70 @@ export interface DesktopPairedAdapterOptions {
   readonly desktopVersion: string;
   /** Cadence of the session-discovery loop that drives observation. */
   readonly discoveryIntervalMs?: number;
+}
+
+interface WorkspaceCandidate {
+  value: DesktopWorkspace;
+  path: string;
+  key: string;
+}
+
+function workspaceError(code: string, message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+async function displayPath(path: string): Promise<string> {
+  return await realpath(path).catch(() => resolve(path));
+}
+
+function pathKey(path: string): string {
+  return process.platform === "win32" ? path.toLowerCase() : path;
+}
+
+function containsPath(parentKey: string, candidateKey: string): boolean {
+  const child = relative(parentKey, candidateKey);
+  return child === "" || (!child.startsWith("..") && !isAbsolute(child));
+}
+
+async function workspaceCandidates(items: readonly DesktopWorkspace[]): Promise<WorkspaceCandidate[]> {
+  const candidates: WorkspaceCandidate[] = [];
+  const paths = new Set<string>();
+  const ids = new Set<string>();
+  for (const value of items) {
+    const path = await displayPath(value.path);
+    const key = pathKey(path);
+    if (paths.has(key) || ids.has(value.workspaceId)) {
+      throw workspaceError("workspace_identity_mismatch", "workspace baseline contains a duplicate workspace id or canonical path");
+    }
+    paths.add(key);
+    ids.add(value.workspaceId);
+    candidates.push({ value, path, key });
+  }
+  return candidates;
+}
+
+async function selectWorkspace(
+  items: readonly DesktopWorkspace[],
+  cwd: string,
+  projectRoot?: string,
+): Promise<{ candidate?: WorkspaceCandidate; rootKey: string; cwdKey: string; resolution: "exact" | "ancestor" }> {
+  const root = projectRoot ?? cwd;
+  const rootKey = pathKey(await displayPath(root));
+  const cwdKey = pathKey(await displayPath(cwd));
+  if (projectRoot !== undefined && !containsPath(rootKey, cwdKey)) {
+    throw workspaceError("invalid_project_root", "projectRoot must be cwd itself or one of its ancestors");
+  }
+  let candidate: WorkspaceCandidate | undefined;
+  for (const current of await workspaceCandidates(items)) {
+    const matches = projectRoot === undefined ? containsPath(current.key, cwdKey) : current.key === rootKey;
+    if (matches && (candidate === undefined || current.key.length > candidate.key.length)) candidate = current;
+  }
+  return {
+    ...(candidate === undefined ? {} : { candidate }),
+    rootKey,
+    cwdKey,
+    resolution: candidate?.key === rootKey ? "exact" : "ancestor",
+  };
 }
 
 /**
@@ -185,31 +251,74 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
     return value;
   }
 
-  async sessionCreate(
-    payload: { cwd: string; agentPreset?: string; sessionId?: string },
-    signal?: AbortSignal,
-  ): Promise<DshUnaryResult<{ sessionId: string; agentPreset?: string }>> {
-    this.requireCapability("createSession", "creating a session");
-    const { workspace } = workspaceCreateResultSchema.parse(
-      await this.callRaw(ENDPOINTS.workspaceCreate, { request: { path: payload.cwd } }, signal),
-    );
-    const canonical = async (path: string) => {
-      const value = await realpath(path).catch(() => resolve(path));
-      return process.platform === "win32" ? value.toLowerCase() : value;
-    };
-    if (await canonical(workspace.path) !== await canonical(payload.cwd)) {
-      throw new Error("workspace/create returned a different directory; refusing to create or prompt a session against the wrong workspace");
+  private async workspaceBaseline(signal?: AbortSignal): Promise<DesktopWorkspace[]> {
+    const deadline = AbortSignal.timeout(10_000);
+    const bounded = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+    for await (const frame of this.options.session.openStream(ENDPOINTS.workspaceFollow, {}, bounded)) {
+      if (frame.type !== "item") break;
+      const parsed = workspaceFollowBaselineSchema.safeParse(frame.value);
+      if (!parsed.success) {
+        throw workspaceError("protocol_mismatch", "workspace/follow returned an invalid baseline");
+      }
+      return parsed.data.value.items;
     }
+    bounded.throwIfAborted();
+    throw workspaceError("protocol_mismatch", "workspace/follow ended before its baseline");
+  }
+
+  private async resolveSessionWorkspace(cwd: string, projectRoot: string | undefined, signal?: AbortSignal) {
+    let selection = await selectWorkspace(await this.workspaceBaseline(signal), cwd, projectRoot);
+    if (selection.candidate === undefined) {
+      selection = await selectWorkspace(await this.workspaceBaseline(signal), cwd, projectRoot);
+    }
+    let candidate = selection.candidate;
+    let created = false;
+    let resolution: DshDesktopWorkspace["resolution"] = selection.resolution;
+    if (candidate === undefined) {
+      const path = projectRoot ?? cwd;
+      const createdResult = workspaceCreateResultSchema.parse(
+        await this.callRaw(ENDPOINTS.workspaceCreate, { request: { path } }, signal),
+      );
+      const display = await displayPath(createdResult.workspace.path);
+      if (pathKey(display) !== selection.rootKey) {
+        throw workspaceError("workspace_identity_mismatch", "workspace/create returned a different canonical project root; refusing to create a session");
+      }
+      candidate = { value: createdResult.workspace, path: display, key: selection.rootKey };
+      created = createdResult.created;
+      resolution = created ? "created" : "exact";
+    }
+    if (candidate === undefined) throw workspaceError("workspace_resolution_failed", "no Desktop workspace could be selected");
+    return { candidate, created, resolution, requestedCwd: await displayPath(cwd) };
+  }
+
+  async sessionCreate(
+    payload: { cwd: string; projectRoot?: string; agentPreset?: string; sessionId?: string },
+    signal?: AbortSignal,
+  ): Promise<DshUnaryResult<{ sessionId: string; agentPreset?: string; desktopWorkspace: DshDesktopWorkspace }>> {
+    this.requireCapability("createSession", "creating a session");
+    const selected = await this.resolveSessionWorkspace(payload.cwd, payload.projectRoot, signal);
     const result = await this.call<{ sessionId: string }>(ENDPOINTS.sessionCreate, {
       request: {
-        workspaceId: workspace.workspaceId,
+        workspaceId: selected.candidate.value.workspaceId,
         ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
         ...(payload.agentPreset === undefined ? {} : { agentPreset: payload.agentPreset }),
       },
     }, signal);
     const parsed = sessionCreateResultSchema.parse(result);
+    const desktopWorkspace: DshDesktopWorkspace = {
+      workspaceId: selected.candidate.value.workspaceId,
+      path: selected.candidate.path,
+      created: selected.created,
+      resolution: selected.resolution,
+      requestedCwd: selected.requestedCwd,
+      sessionCwd: selected.candidate.path,
+    };
     return attachDshUnaryMetadata(
-      { sessionId: parsed.sessionId, ...(parsed.agentPreset === undefined ? {} : { agentPreset: parsed.agentPreset }) },
+      {
+        sessionId: parsed.sessionId,
+        ...(parsed.agentPreset === undefined ? {} : { agentPreset: parsed.agentPreset }),
+        desktopWorkspace,
+      },
       { issuedRpcId: ENDPOINTS.sessionCreate, method: ENDPOINTS.sessionCreate },
     );
   }

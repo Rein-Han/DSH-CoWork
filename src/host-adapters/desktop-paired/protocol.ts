@@ -31,6 +31,7 @@ export const API_CHANNEL = "/api";
 /** Endpoints this adapter implements, by `namespace/method`. */
 export const ENDPOINTS = {
   workspaceCreate: "workspace/create",
+  workspaceFollow: "workspace/follow",
   sessionList: "session/list",
   sessionCreate: "session/create",
   sessionPrompt: "session/prompt",
@@ -148,9 +149,35 @@ export const sessionListResultSchema = z
   })
   .passthrough();
 
+export const workspaceSchema = z
+  .object({
+    workspaceId: z.string().min(1),
+    path: z.string().min(1),
+    title: z.string(),
+    sessionIds: z.array(z.string()),
+    createdAt: z.string().min(1),
+    updatedAt: z.string().min(1),
+  })
+  .passthrough();
+
+export type DesktopWorkspace = z.infer<typeof workspaceSchema>;
+
+export const workspaceFollowBaselineSchema = z
+  .object({
+    type: z.literal("baseline"),
+    value: z
+      .object({
+        items: z.array(workspaceSchema),
+        archivedSessionIds: z.array(z.string()),
+        pinnedSessionIds: z.array(z.string()),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
 export const workspaceCreateResultSchema = z
   .object({
-    workspace: z.object({ workspaceId: z.string().min(1), path: z.string().min(1) }).passthrough(),
+    workspace: workspaceSchema,
     created: z.boolean(),
   })
   .passthrough();

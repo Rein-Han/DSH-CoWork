@@ -1,9 +1,9 @@
 # Cowork semantics (canonical)
 
-Both `codex-dsh-desktop` and `claude-dsh-desktop` are generated from this page.
-Each skill carries its own copy under `references/cowork-semantics.md`, so an
-installed skill never reaches into another skill's directory. A test asserts that
-the canonical page and both copies state the same rules.
+Each of the five caller skills carries its own copy under
+`references/cowork-semantics.md`, so an installed skill never reaches into
+another skill's directory. A test asserts that the canonical page and all five
+copies state the same rules.
 
 ## Roles
 
@@ -14,9 +14,9 @@ directory for configuration, rollback, capability limits and acceptance tools.
 The server's `clientLongWaitVerified=false` is not an assertion that long calls
 fail; the server cannot certify a caller UI from its environment.
 
-- **Main agent** (the current Codex or Claude Code session): decomposes the work,
-  decides what DSH should do, writes the handoff, supervises, and **accepts the
-  result itself**. DSH finishing is not the same as the work being accepted.
+- **Main agent** (the current caller session): decomposes the work, decides what
+  DSH should do, writes the handoff, supervises, and **accepts the result
+  itself**. DSH finishing is not the same as the work being accepted.
 - **DSH Desktop**: runs the task in the user's own already-running Desktop Host,
   using DSH's native sessions, tools, files, and permissions. It is not a
   subagent of the main agent and does not inherit its context.
@@ -34,26 +34,61 @@ fail; the server cannot certify a caller UI from its environment.
    preconditions, then `dsh_attach_session`. Attaching sends no prompt, renames
    nothing, and selects no model. Continue with `dsh_followup` only after the
    user's intent is clear.
-3. **New independent work** — `dsh_delegate` with the project's real `cwd`.
-   Never use the bridge installation directory as the working directory.
+3. **New independent work** — `dsh_delegate` with the caller's current project
+   root as `projectRoot` and the real task directory as `cwd`. Never use the
+   bridge installation directory as the working directory.
 
 A title is a display aid, never an identity. If the match is ambiguous, return
 the candidates and ask; if the user has not asked to continue an old session,
 create a new one.
+
+## Workspace selection and evidence
+
+For new work, pass both `projectRoot` and `cwd`. `projectRoot` is the caller's
+current project root; `cwd` is the requested task directory. `projectRoot` must
+be `cwd` itself or its ancestor. The caller name is attribution metadata only
+and never participates in workspace selection.
+
+With an explicit `projectRoot`, reuse an existing workspace only when its path
+is exactly that root; if none exists, create a workspace only at that root. Do
+not fall back to a higher-level workspace. When `projectRoot` is omitted, reuse
+the nearest existing workspace at `cwd` or one of its ancestors; if none exists,
+create one at `cwd`. Existing sessions are not moved by this selection logic,
+and other legacy behavior remains unchanged.
+
+Host 0.2.1-rc.2 does not allow `workspaceId` together with `cwd` when creating a
+session. Once a workspace is selected, the actual session cwd is forced to
+`workspace.path`. For a subdirectory task, both the real session cwd and the
+bridge claim are therefore promoted to the project root. The input `cwd` still
+belongs in the prompt as the task scope; it is not a filesystem sandbox. An
+independent worktree must not be assigned to another project without explicitly
+widening the task scope.
+
+Check `delegated.desktopWorkspace` before treating project attribution as
+verified. It contains `workspaceId`, `path`, `created`, `resolution`,
+`requestedCwd`, and `sessionCwd`; `resolution` is `exact`, `ancestor`, or
+`created`. With an explicit root, `path` and `sessionCwd` must equal the
+canonical `projectRoot`, while `requestedCwd` must equal the canonical requested
+`cwd`. Also check that
+`workspaceClaim.cwd == desktopWorkspace.sessionCwd == desktopWorkspace.path`.
+Missing or mismatched evidence means attribution is not verified: preserve the
+task and receipt, report the problem, and do not delegate the same work again.
 
 ## Handoff summary
 
 The `prompt` is a compact structured brief, not a transcript:
 
 - objective and expected deliverable;
-- `cwd` and the allowed scope of modification;
+- `projectRoot`, the requested `cwd`, and the allowed scope of modification;
 - what is already done and which paths matter;
 - constraints (versions, commands that must pass, things not to touch);
 - acceptance evidence to return (diff summary, commands, outputs);
 - the shape of the answer you want back.
 
 Never upload the whole chat, internal reasoning, secrets, or large file bodies.
-Reference paths that the DSH Host can actually read.
+Reference paths that the DSH Host can actually read. When the actual session cwd
+is promoted to the project root, keep the requested `cwd` explicit in the prompt
+as the task scope rather than implying that DSH is confined to that directory.
 
 ## Model, preset, and approval policy: inherit
 
@@ -67,9 +102,10 @@ Reference paths that the DSH Host can actually read.
 
 One directory (and its parents/children) has one writer. Two tasks that write
 must use disjoint directories or separate worktrees. `dsh_delegate` claims the
-workspace; a conflicting claim is refused rather than queued. Only the process
-holding the control lease may prompt, steer, or cancel; every other caller is
-read-only for that task.
+selected `workspace.path`, which may be an ancestor of the requested `cwd`; a
+conflicting claim is refused rather than queued. Only the process holding the
+control lease may prompt, steer, or cancel; every other caller is read-only for
+that task.
 
 Release the claim with `dsh_release_workspace` **after** you have reviewed the
 result. While the session is running, queued, awaiting approval, or awaiting

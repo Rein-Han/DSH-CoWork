@@ -120,8 +120,13 @@ export async function verifyDesktop(project: string, timeoutMs: number): Promise
 
   const deadline = Date.now() + timeoutMs;
   try {
-    const created = await adapter.sessionCreate({ cwd: project });
-    steps.push({ step: "session-create", ok: true, detail: `created ${created.sessionId} in ${project}` });
+    const created = await adapter.sessionCreate({ cwd: project, projectRoot: project });
+    const workspace = created.desktopWorkspace;
+    steps.push({
+      step: "session-create",
+      ok: workspace.sessionCwd === workspace.path && workspace.requestedCwd === workspace.path,
+      detail: `created ${created.sessionId} in ${workspace.path} (${workspace.resolution}, created=${String(workspace.created)})`,
+    });
     base.sessionId = created.sessionId;
 
     await adapter.sessionPrompt({ sessionId: created.sessionId, mode: "queue", content: [{ type: "text", text: PROMPT }] });

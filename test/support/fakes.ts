@@ -61,7 +61,9 @@ export class FakeDshApi implements DshApi {
     return this.unary("session.list", { items: structuredClone(this.sessions) });
   }
 
-  async sessionCreate(payload: { cwd: string; agentPreset?: string; sessionId?: string }) {
+  nextDesktopWorkspace?: import("../../src/dsh-types.js").DshDesktopWorkspace;
+
+  async sessionCreate(payload: { cwd: string; projectRoot?: string; agentPreset?: string; sessionId?: string }) {
     this.calls.push({ method: "session.create", payload });
     const sessionId = payload.sessionId ?? this.nextSessionId;
     if (!this.sessions.some((item) => item.sessionId === sessionId)) {
@@ -70,6 +72,7 @@ export class FakeDshApi implements DshApi {
     return this.unary("session.create", {
       sessionId,
       ...(payload.agentPreset === undefined ? {} : { agentPreset: payload.agentPreset }),
+      ...(this.nextDesktopWorkspace === undefined ? {} : { desktopWorkspace: this.nextDesktopWorkspace }),
     });
   }
 

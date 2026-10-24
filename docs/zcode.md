@@ -88,39 +88,39 @@ MCP 写入项目下的 `.zcode/config.json`，技能写入 `.zcode/skills/zcode-
 
 保持 DSH Desktop 运行，在项目的 ZCode 会话中说：
 
-> 把这个任务交给 DSH：检查当前项目的 README 和安装步骤，只读检查，给出发现和建议。项目目录使用当前工作区。完成后由你验收。
+> 把这个任务交给 DSH：检查当前项目的 README 和安装步骤，只读检查，给出发现和建议。projectRoot 使用当前项目根，cwd 使用实际任务目录。完成后由你验收。
 
 也可以输入 `/zcode-dsh-desktop` 加载技能，再描述任务。
 
-新对话按任务的 `cwd` 归入 DSH 的项目文件夹。例如 `cwd` 为 `C:\work\my-project` 时，桥接服务会先调用 `workspace/create`，按目录路径取得或登记项目，再用返回的 `workspaceId` 创建对话。已有项目的名称和目录保持原样。
+新任务必须同时传 `projectRoot`（调用方当前项目根）和 `cwd`（请求任务目录），且 `projectRoot` 是 `cwd` 自身或祖先。显式 `projectRoot` 只精确复用该根的已有 workspace，没有则只在该根创建，不退到更上层项目。省略 `projectRoot` 时，复用 `cwd` 本身或最近祖先的已有 workspace，都没有才以 `cwd` 创建。已有会话不迁移，其他 legacy 行为不变。
 
-项目归属取决于任务目录，和 DSH-CoWork 源码存放位置分别管理。希望对话出现在父目录项目下时，应将任务的 `cwd` 设为父目录。此行为适用于新建对话；已有对话不会自动迁移。
+项目归属与 DSH-CoWork 源码存放位置分别管理。调用方名字只用于归因，不影响项目选择；独立 worktree 未明确扩大范围时不得归入另一个项目。Host 0.2.1-rc.2 不允许创建会话时同时传 `workspaceId` 和 `cwd`，选择 workspace 后实际 session cwd 强制为 `workspace.path`。子目录任务的真实会话 cwd 和 bridge claim 因而提升到项目根；输入 `cwd` 仍放在 prompt 中作为任务范围，不是沙箱。
+
+核对 `delegated.desktopWorkspace`：`path/sessionCwd` 是 canonical `projectRoot`，`requestedCwd` 是 canonical `cwd`，`resolution` 为 `exact|ancestor|created`，并确认 `workspaceClaim.cwd==sessionCwd==path`。证据缺失或不符时保留任务和回执并报告，不重派。
 
 ZCode 保存 `taskId`、回执的 `targetStartAfterCursor` 和 `nextCursor`，每次明确使用 `until=terminal,responseMode=compact,timeoutSec=30`。普通事件留在桥接内部；超时不重派、不取消 DSH。完成后获取完整结果、核对归属并验收，再正常释放 claim。队列/作业状态未知仍拒绝释放。阶段监督、steer/cancel、旧调用 change/full 和历史恢复保持可用。
 
-返回的项目目录与请求 cwd 不一致时拒绝创建会话。同一目录树同一时间保持一个写任务；read-only 是协作约定，实际权限由 Desktop 决定。ZCode 尚未通过原生长调用验收，安装器和运行时均拒绝 long。
+同一目录树同一时间保持一个写任务；read-only 是协作约定，实际权限由 Desktop 决定。ZCode 尚未通过原生长调用验收，安装器和运行时均拒绝 long。
 
-## 真实往返测试
+## SDK 真实往返测试（非原生 UI 验收）
 
-用户级安装完成后，在仓库目录执行：
-
-```powershell
-node scripts/verify-zcode.mjs
-```
-
-脚本读取用户级配置，发送只读标记任务，绑定回执等待、取完整结果并正常释放。消耗少量模型额度并保留 DSH 对话。SDK PASS 只证明桥接到真实 Host，不代替 ZCode 原生界面验收。
-
-可使用 `--project 'C:\work\my-project'` 指定项目。项目配置加 `--config 'C:\work\my-project\.zcode\config.json'`。回执立即保存到 `<project>/artifacts/dsh-verification/<taskId>.json`。
-
-任务超时或待交互后，处理完可用回执续接同一轮：
+用户级安装完成后，在仓库目录执行，并替换为实际存在的项目根和任务目录：
 
 ```powershell
-node scripts/verify-zcode.mjs --receipt '<printed-receipt-path>'
+node scripts/verify-zcode.mjs --project 'C:\work\my-project' --cwd 'C:\work\my-project\packages\demo'
 ```
 
-总观察预算 180 秒，每次最多 30 秒。续接不再派发；使用过自定义 project/config/bridge-home 时须提供相同参数。单独旧 taskId 不足以确定目标轮次，因此会被拒绝。审批和输入在 Desktop 处理。
+`--project` 始终表示项目根；可选 `--cwd` 表示请求任务目录，默认等于 `--project`。项目配置加 `--config 'C:\work\my-project\.zcode\config.json'`。脚本读取配置，发送只读标记任务，校验项目证据，绑定回执等待、取完整结果并正常释放。消耗少量模型额度并保留 DSH 对话。回执立即保存到 `<project>/artifacts/dsh-verification/<taskId>.json`，其中包含 `project`、`requestedCwd` 和 `desktopWorkspace`。SDK PASS 只证明桥接到真实 Host 及返回证据，不代替 ZCode 原生界面验收。
 
-最终在 ZCode 原生界面验证工具/skill 加载、等待不刷屏、完整结果、正常释放、同目录再派写任务，以及用户中断和审批。不得把 SDK 结果当作原生客户端已全部通过。
+任务超时或待交互后，处理完可用相同项目参数和回执续接同一轮：
+
+```powershell
+node scripts/verify-zcode.mjs --project 'C:\work\my-project' --cwd 'C:\work\my-project\packages\demo' --receipt '<printed-receipt-path>'
+```
+
+总观察预算 180 秒，每次最多 30 秒。续接不再派发；使用过自定义 project/cwd/config/bridge-home 时须提供相同参数。没有新增项目证据字段的旧回执仍可恢复。单独旧 taskId 不足以确定目标轮次，因此会被拒绝。审批和输入在 Desktop 处理。
+
+最终在 ZCode 原生界面验证工具/skill 加载、项目归属及 workspace/claim 证据、等待不刷屏、完整结果、正常释放、同目录再派写任务，以及用户中断和审批。不得把 SDK 结果当作原生客户端已全部通过。
 
 如果任务返回 `DeepSeek Messages transport failed` 或其他模型错误，先在 DSH Desktop 中检查该对话和模型连接。连接成功、任务已接收和模型正常回复是不同的检查结果。
 

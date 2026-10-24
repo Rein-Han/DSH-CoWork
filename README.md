@@ -118,15 +118,16 @@ ZCode、Kimi Code、Kimi Work 均使用 `terminal/compact` 和最多 30 秒的�
 
 ## 使用
 
-保持 DSH Desktop 处于打开状态，在 ZCode / Codex / Claude Code 里直接说：
+保持 DSH Desktop 处于打开状态，在 Codex / Claude Code / ZCode / Kimi Code / Kimi Work 里直接说：
 
 > 把这个任务交给 DSH：修复登录页提交失败的问题，只改登录相关代码和测试。做完你检查改动和测试，再告诉我结果。
 
-- 可以让调用方使用对应的 skill，也可以显式调用：ZCode 里输入 `/zcode-dsh-desktop`，Claude Code 里输入 `/claude-dsh-desktop`，Codex 里输入 `$codex-dsh-desktop`。
-- 新对话按任务的 `cwd` 归入 DSH Desktop 中对应路径的项目文件夹；已有项目会直接复用，该路径尚未登记为项目时自动登记。
+- 可以让调用方使用对应的 skill，也可以显式调用：ZCode 里输入 `/zcode-dsh-desktop`，Claude Code 里输入 `/claude-dsh-desktop`，Codex 里输入 `$codex-dsh-desktop`，Kimi Code 里输入 `/skill:kimi-code-dsh-desktop`。
+- 新对话同时传 `projectRoot`（调用方当前项目根）和 `cwd`（请求任务目录）。精确匹配的已有 DSH 项目必须复用；不存在时只在该项目根创建。省略 `projectRoot` 的旧调用会复用最近已有父项目，没有时才以 `cwd` 创建。调用方名称不影响项目选择。
+- Desktop 0.2.1-rc.2 不允许 `workspaceId + cwd` 同时创建会话，选择项目后实际 session cwd 和 bridge claim 都是项目根；子目录只作为 prompt 中的任务范围，不是沙箱。返回的 `desktopWorkspace` 包含 `workspaceId/path/created/resolution/requestedCwd/sessionCwd`，可用于核对归属。
 - 模型和推理强度沿用 DSH Desktop 里的设置，这里不能修改。
 - DSH 需要审批或向你提问时，到 DSH Desktop 里处理，调用方不会代你批准。
-- 同一个目录同一时间只允许一个任务写入。任务验收后，桥接通过 Desktop 的实时 inbox 和 job/list 检查待处理输入及活动作业，再释放目录占用；接口缺失、状态过期或读取失败仍保留占用并报告 `workspace_state_unknown`。已验证 Desktop 0.2.1-rc.2 的完整连续写任务流程。
+- 同一实际项目根目录树同一时间只允许一个任务写入。任务验收后，桥接通过 Desktop 的实时 inbox 和 job/list 检查待处理输入及活动作业，再释放目录占用；接口缺失、状态过期或读取失败仍保留占用并报告 `workspace_state_unknown`。已验证 Desktop 0.2.1-rc.2 的完整连续写任务流程。
 
 ### 监督耗额修复（2026-10-21）
 

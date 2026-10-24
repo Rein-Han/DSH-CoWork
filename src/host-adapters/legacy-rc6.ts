@@ -48,8 +48,12 @@ export class LegacyRc6Adapter implements HostAdapter {
     return this.client.sessionList(signal);
   }
 
-  sessionCreate(payload: { cwd: string; agentPreset?: string; sessionId?: string }, signal?: AbortSignal) {
-    return this.client.sessionCreate(payload, signal);
+  sessionCreate(payload: { cwd: string; projectRoot?: string; agentPreset?: string; sessionId?: string }, signal?: AbortSignal) {
+    return this.client.sessionCreate({
+      cwd: payload.cwd,
+      ...(payload.agentPreset === undefined ? {} : { agentPreset: payload.agentPreset }),
+      ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
+    }, signal);
   }
 
   sessionModels(sessionId: string, signal?: AbortSignal): Promise<DshUnaryResult<DshSessionModels>> {

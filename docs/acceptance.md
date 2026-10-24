@@ -1,5 +1,34 @@
 # Acceptance matrix — DSH Desktop Cowork private build
 
+## 2026-10-24 Desktop project workspace resolution
+
+- Strict product build PASS. Standard `npm run check` reports **317 PASS / 6 FAIL**;
+  all six failures are the known Windows `EPERM symlink` privilege cases. The full
+  portable regression excluding exactly those six cases reports **317 PASS / 0 FAIL**.
+  Test-source emission retains the pre-existing typing diagnostics; this is not a
+  clean test-tsc claim. New adapter, Bridge, MCP and five-skill contract tests pass.
+- Existing Co-working reuse PASS: Kimi Code `dsh_cef3af9f6579` used a legacy test
+  subdirectory as requested cwd but returned `created=false`, `resolution=exact`,
+  with session cwd and claim both at the Co-working root. Desktop shows the session
+  under Co-working, not under the subdirectory project.
+- Existing Buffer Calculator reuse PASS: Codex `dsh_dfa07a9d691b` returned
+  `created=false`, `resolution=exact` at the existing project root; Desktop shows
+  the session under Buffer Calculator.
+- New-project creation and cross-caller reuse PASS: Codex `dsh_166ee5cae603`
+  created exactly one new root (`created=true`, `resolution=created`). Claude Code
+  `dsh_87374f2016cb`, ZCode `dsh_cd2d4d738558`, Kimi Code `dsh_c212c978907d`, and
+  Kimi Work `dsh_84e930d68ba3` all reused workspaceId
+  `2dc52a88-d0dd-4599-9837-535ac4824426` with `created=false` and `resolution=exact`.
+  All five sessions used the project root as actual cwd/claim; no `child` project
+  was created. Desktop's expanded project row shows all five under the same root.
+- Every real marker result was read in full and released with `desktop-live`
+  inbox/jobs evidence (`queueKnownEmpty=true`, `jobsKnownIdle=true`). The acceptance
+  bridge homes contain no remaining claim files. Evidence:
+  `analysis/project-grouping-20261024/` (receipts and per-project summaries).
+- These are real Host plus SDK and Desktop-sidebar observations, not native
+  Codex/Claude/ZCode/Kimi UI acceptance. Each installed caller must reload its MCP
+  schema and updated skill before native use; Connector was not reinstalled.
+
 ## 2026-10-24 ZCode / Kimi local integration
 
 - Product strict TypeScript build PASS; portable regression **310 PASS / 0 FAIL**.

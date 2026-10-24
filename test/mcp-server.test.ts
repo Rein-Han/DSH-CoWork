@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -102,6 +102,7 @@ test("MCP server exposes semantic delegate routing while rejecting arbitrary mod
     assert.match(delegateTool?.description ?? "", /compact handoff/i);
     assert.match(delegateTool?.description ?? "", /focus paths first/i);
     assert.match(JSON.stringify(delegateTool?.inputSchema), /not a DSH Host filesystem sandbox selector/);
+    assert.doesNotMatch(JSON.stringify(delegateTool?.inputSchema), /projectRoot/);
     assert.match(JSON.stringify(delegateTool?.inputSchema), /modlens-pro/);
     const followupTool = tools.tools.find((tool) => tool.name === "dsh_followup");
     assert.match(followupTool?.description ?? "", /same known BridgeTask/i);
@@ -374,6 +375,35 @@ test("MCP server exposes bounded reuse discovery on dsh_find_sessions without hi
     await server.close();
     await rm(requestedCwd, { recursive: true, force: true });
     await rm(otherCwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("desktop MCP exposes and forwards projectRoot for Desktop workspace resolution", async () => {
+  const home = await mkdtemp(join(tmpdir(), "codex-dsh-mcp-project-"));
+  const api = new FakeDshApi();
+  const tasks = new TaskStore(home);
+  const ledger = new EventLedger(home);
+  const service = new BridgeService({ hostUrl: "http://127.0.0.1:3080", homeDir: home, requestTimeoutMs: 1_000, allowRemoteHost: false }, api, tasks, new FakeConnection(ledger), ledger);
+  const server = createMcpServer(service, { toolProfile: "desktop" });
+  const client = new Client({ name: "test-client", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const tools = await client.listTools();
+    const delegateTool = tools.tools.find((tool) => tool.name === "dsh_delegate");
+    assert.match(JSON.stringify(delegateTool?.inputSchema), /projectRoot/);
+    assert.match(delegateTool?.description ?? "", /selected workspace path becomes the actual session and claim cwd/i);
+    const delegated = await client.callTool({
+      name: "dsh_delegate",
+      arguments: { prompt: "read-only project check", cwd: home, projectRoot: home, waitSeconds: 0, workspaceMode: "read-only" },
+    });
+    assert.equal(delegated.isError, undefined);
+    const create = api.calls.find((call) => call.method === "session.create");
+    assert.deepEqual(create?.payload, { cwd: await realpath(home), projectRoot: await realpath(home) });
+  } finally {
+    await client.close();
+    await server.close();
     await rm(home, { recursive: true, force: true });
   }
 });
