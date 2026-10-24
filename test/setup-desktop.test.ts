@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 
 import {
   applyClaudeEntry,
+  applyZcodeEntry,
   applyCodexTable,
   bridgeEnvironment,
   buildPlan,
@@ -15,6 +16,7 @@ import {
   SERVER_NAME,
 } from "../src/setup-desktop.js";
 import { createMcpServer } from "../src/mcp-server.js";
+import { loadConfig } from "../src/config.js";
 
 const NODE = "C:\\Program Files\\nodejs\\node.exe";
 const ENTRY = "C:\\tools\\dsh-desktop-cowork\\dist\\index.js";
@@ -108,6 +110,51 @@ describe("claude configuration upsert", () => {
     assert.equal(claude.DSH_CALLER_KIND, "claude-code");
     assert.equal(claude.DSH_APPROVAL_MODE, "desktop");
     assert.equal(claude.DSH_MODEL_POLICY, "inherit");
+  });
+});
+
+describe("zcode configuration upsert", () => {
+  const entry = { type: "stdio", command: NODE, args: [ENTRY], env: bridgeEnvironment("C:\\bridge\\connection.json", "zcode") };
+
+  it("preserves settings and sibling servers, and removes only its own entry", () => {
+    const existing = { plugins: { enabled: true }, mcp: { enabled: true, servers: { other: { command: "other" } } } };
+    const once = applyZcodeEntry(JSON.stringify(existing), entry);
+    assert.equal(applyZcodeEntry(once, entry), once);
+    const parsed = JSON.parse(once);
+    assert.deepEqual(parsed.plugins, existing.plugins);
+    assert.equal(parsed.mcp.enabled, true);
+    assert.deepEqual(parsed.mcp.servers.other, existing.mcp.servers.other);
+    assert.deepEqual(parsed.mcp.servers.dsh_desktop, entry);
+    assert.deepEqual(JSON.parse(applyZcodeEntry(once, undefined)), existing);
+  });
+
+  it("rejects malformed containers instead of overwriting them", () => {
+    for (const content of ["[]", '{"mcp":null}', '{"mcp":{"servers":[]}}']) {
+      assert.throws(() => applyZcodeEntry(content, entry));
+    }
+  });
+
+  it("registers and reinstalls a project-scoped ZCode caller", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dsh-zcode-setup-"));
+    const previous = process.env.DSH_CONNECTION_FILE;
+    try {
+      const connectionFile = join(dir, "connection.json");
+      await writeFile(connectionFile, "{}", "utf8");
+      process.env.DSH_CONNECTION_FILE = connectionFile;
+      const options = parseArgs(["--caller", "zcode", "--scope", "project", "--project", dir, "--apply"]);
+      const plan = await buildPlan(options);
+      assert.equal(plan.writes.find((write) => write.kind === "mcp-config")?.target, join(dir, ".zcode", "config.json"));
+      assert.deepEqual((await applyPlan(plan)).refused, []);
+      const config = JSON.parse(await readFile(join(dir, ".zcode", "config.json"), "utf8"));
+      assert.equal(config.mcp.servers.dsh_desktop.env.DSH_CALLER_KIND, "zcode");
+      assert.equal(loadConfig(config.mcp.servers.dsh_desktop.env).callerKind, "zcode");
+      assert.match(await readFile(join(dir, ".zcode", "skills", "zcode-dsh-desktop", "SKILL.md"), "utf8"), /name: zcode-dsh-desktop/u);
+      assert.equal((await buildPlan(options)).writes.find((write) => write.kind === "mcp-config")?.before, "identical");
+    } finally {
+      if (previous === undefined) delete process.env.DSH_CONNECTION_FILE;
+      else process.env.DSH_CONNECTION_FILE = previous;
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

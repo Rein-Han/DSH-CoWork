@@ -1,8 +1,10 @@
 # DSH-CoWork
 
-让 Codex / Claude Code 把任务交给你电脑上已经打开的 **DeepSeek Harness Desktop**（下文简称 DSH）去做，然后查看进度、拿回结果、自己验收。
+让 Codex / Claude Code / ZCode / Kimi Code，以及具备用户 MCP 设置入口的 Kimi Work，把任务交给你电脑上已经打开的 **DeepSeek Harness Desktop**（下文简称 DSH），然后查看进度、拿回结果、自己验收。
 
-你在 Codex 或 Claude Code 里说一句"把这个交给 DSH"，它会在 DSH Desktop 里新建一个会话执行任务。你可以在 DSH Desktop 里看到同一个会话和它的每一步操作，做完后 Codex / Claude 再检查改动和测试。
+当前源码整合了 P1–P3 修复、ZCode 接入与新会话项目归属，并新增 Kimi 接入。见 [ZCode 指南](docs/zcode.md) 和 [Kimi Code / Kimi Work 指南](docs/kimi.md)。这些本地源码改动尚未打入现有 exe 安装包。
+
+在调用方里说一句“把这个交给 DSH”，它会在 DSH Desktop 里新建一个会话执行任务。你可以在 DSH Desktop 里看到同一个会话和它的每一步操作，做完后由调用方检查改动和测试。
 
 > 当前是测试版，只支持 Windows，已在 DeepSeek Harness Desktop 0.2.1-rc.2（Host 协议 4）上实机连通。
 
@@ -11,8 +13,8 @@
 | 部分 | 作用 |
 |---|---|
 | DSH 插件 `dsh-desktop-cowork-connector` | 装进 DSH Desktop。DSH 每次启动时，它把本机端口和登录凭据写到一个只有你本人能读的文件里，不开端口、不代理请求 |
-| MCP 服务 `dsh_desktop` | 由 Codex / Claude 自动启动，读取上面的文件后连接 DSH，提供 `dsh_delegate`、`dsh_wait`、`dsh_followup` 等工具 |
-| skill `codex-dsh-desktop` / `claude-dsh-desktop` | 告诉 Codex / Claude 什么时候用这些工具、怎么交接任务、怎么验收 |
+| MCP 服务 `dsh_desktop` | 由配置好的调用方启动，读取上面的文件后连接 DSH，提供 `dsh_delegate`、`dsh_wait`、`dsh_followup` 等工具 |
+| 各调用方的 `*-dsh-desktop` skill | 告诉调用方怎么交接任务、等待、验收和释放目录；五端共用同一桥接协议 |
 
 ## 安装
 
@@ -21,7 +23,7 @@ terminal 等待、取消观察隔离、限频进度、增量账本与共享检�
 默认仍是 bounded；150 秒/10 分钟协议测试通过不等于原生客户端界面验收通过。
 临时 `dsh_wait_acceptance` 只运行定时器，用于无模型开销的客户端验收。
 
-需要：Windows 10/11 x64，已为当前用户安装 DeepSeek Harness Desktop，以及 Codex 和/或 Claude Code。
+需要：Windows 10/11 x64，已为当前用户安装 DeepSeek Harness Desktop，以及 ZCode、Codex 或 Claude Code。ZCode 请按 [专项指南](docs/zcode.md) 从源码安装。
 
 ### 方式一：安装包（推荐）
 
@@ -72,15 +74,58 @@ npm run build
    npm run verify-desktop -- --project "$env:USERPROFILE\Documents\cowork-acceptance"
    ```
 
+### ZCode 接入
+
+完整步骤见 [ZCode 安装与使用指南](docs/zcode.md)。完成源码构建和 DSH 插件安装后，保持 DSH Desktop 运行，再注册 ZCode：
+
+```powershell
+npm run setup-desktop -- --caller zcode --scope user --dry-run
+npm run setup-desktop -- --caller zcode --scope user --apply
+```
+
+安装器会在 `~/.zcode/cli/config.json` 的 `mcp.servers` 中注册 `dsh_desktop`，并把 `zcode-dsh-desktop` 技能安装到 `~/.zcode/skills/`。配置写入前会生成备份。重新打开 ZCode 会话后，可以说“把这个任务交给 DSH”，或使用 `/zcode-dsh-desktop`。
+
+在当前仓库目录执行以下命令，可以用 ZCode 已注册的 MCP 配置发送一次只读测试消息。测试会在 DSH Desktop 中保留一个会话，并消耗少量模型额度：
+
+```powershell
+node scripts/verify-zcode.mjs
+```
+
+卸载 ZCode 接入配置：
+
+```powershell
+npm run setup-desktop -- --caller zcode --scope user --uninstall --apply
+```
+
+### Kimi Code / Kimi Work 接入
+
+Kimi Code 支持用户级和项目级配置。用户级安装：
+
+```powershell
+npm run setup-desktop -- --caller kimi-code --scope user --dry-run
+npm run setup-desktop -- --caller kimi-code --scope user --apply
+```
+
+Kimi Work 导出 MCP 设置参数和独立 skill：
+
+```powershell
+npm run setup-desktop -- --caller kimi-work --output .\artifacts\kimi-work-dsh-desktop --apply
+```
+
+将参数填入 Work 的 **Plugins → MCP** 设置页，再通过客户端支持的入口添加 skill。本机 Work 3.2.15 禁止本地插件携带 MCP；若账号没有 MCP 设置页，暂时无法通过此路径接入。导出成功不等于客户端已安装。详细限制和验收见 [Kimi 指南](docs/kimi.md)。
+
+ZCode、Kimi Code、Kimi Work 均使用 `terminal/compact` 和最多 30 秒的有界等待，安装器及运行时拒绝为它们启用未经验证的 `long`。`--caller both` 仍只表示 Codex 与 Claude。
+
 ## 使用
 
-保持 DSH Desktop 处于打开状态，在 Codex / Claude Code 里直接说：
+保持 DSH Desktop 处于打开状态，在 ZCode / Codex / Claude Code 里直接说：
 
 > 把这个任务交给 DSH：修复登录页提交失败的问题，只改登录相关代码和测试。做完你检查改动和测试，再告诉我结果。
 
-- 你的话里提到 DSH 就会自动触发对应的 skill；也可以显式调用：Claude Code 里输入 `/claude-dsh-desktop`，Codex 里输入 `$codex-dsh-desktop`。
+- 可以让调用方使用对应的 skill，也可以显式调用：ZCode 里输入 `/zcode-dsh-desktop`，Claude Code 里输入 `/claude-dsh-desktop`，Codex 里输入 `$codex-dsh-desktop`。
+- 新对话按任务的 `cwd` 归入 DSH Desktop 中对应路径的项目文件夹；已有项目会直接复用，该路径尚未登记为项目时自动登记。
 - 模型和推理强度沿用 DSH Desktop 里的设置，这里不能修改。
-- DSH 需要审批或向你提问时，到 DSH Desktop 里处理，Codex / Claude 不会代你批准。
+- DSH 需要审批或向你提问时，到 DSH Desktop 里处理，调用方不会代你批准。
 - 同一个目录同一时间只允许一个任务写入。任务验收后，桥接通过 Desktop 的实时 inbox 和 job/list 检查待处理输入及活动作业，再释放目录占用；接口缺失、状态过期或读取失败仍保留占用并报告 `workspace_state_unknown`。已验证 Desktop 0.2.1-rc.2 的完整连续写任务流程。
 
 ### 监督耗额修复（2026-10-21）

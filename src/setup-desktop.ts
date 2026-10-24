@@ -2,8 +2,8 @@
 /**
  * `setup-desktop` — the single installer entry point for the private build.
  *
- * It registers the `dsh_desktop` MCP server with Codex and/or Claude Code and
- * installs the matching caller skill. Only this project's own entries are
+ * It registers Codex, Claude Code, ZCode, or Kimi Code and their caller skill;
+ * Kimi Work receives MCP form settings and a separate skill export. Own entries are
  * touched, every changed file is backed up with its hash recorded, a second run
  * is a no-op, and nothing that carries the launch token is ever written into a
  * configuration file.
@@ -25,12 +25,14 @@ import { fileURLToPath } from "node:url";
 import { atomicInstallText, readConfigSnapshot } from "./setup-engine.js";
 import { inspectDesktopHost } from "./desktop/doctor-desktop.js";
 
-export type Caller = "codex" | "claude" | "both";
+export type DesktopCaller = "codex" | "claude" | "zcode" | "kimi-code" | "kimi-work";
+export type Caller = DesktopCaller | "both";
 export type Scope = "user" | "project";
 
 export const SERVER_NAME = "dsh_desktop";
 export const LEGACY_SERVER_NAMES = ["dsh_agentlink", "dsh_collab"] as const;
-const SKILL_NAMES = { codex: "codex-dsh-desktop", claude: "claude-dsh-desktop" } as const;
+const SKILL_NAMES = { codex: "codex-dsh-desktop", claude: "claude-dsh-desktop", zcode: "zcode-dsh-desktop", "kimi-code": "kimi-code-dsh-desktop", "kimi-work": "kimi-work-dsh-desktop" } as const;
+export const BOUNDED_CALLERS: readonly DesktopCaller[] = ["zcode", "kimi-code", "kimi-work"];
 
 export interface SetupOptions {
   caller: Caller;
@@ -43,11 +45,13 @@ export interface SetupOptions {
   /** Override the entry script; defaults to this package's compiled index.js. */
   entry?: string;
   waitProfile?: "bounded" | "long";
+  /** Kimi Work exports MCP form settings and a separate skill-only plugin source. */
+  outputDir?: string;
 }
 
 interface PlannedWrite {
-  caller: "codex" | "claude";
-  kind: "mcp-config" | "skill";
+  caller: DesktopCaller;
+  kind: "mcp-config" | "export" | "skill";
   target: string;
   description: string;
   before: "absent" | "identical" | "differs";
@@ -89,10 +93,10 @@ export function parseArgs(argv: readonly string[]): SetupOptions {
     switch (arg) {
       case "--caller": {
         const value = next();
-        if (value !== "codex" && value !== "claude" && value !== "both") {
-          throw new Error(`--caller must be codex, claude, or both, received ${value}`);
+        if (!["codex", "claude", "zcode", "kimi-code", "kimi-work", "both"].includes(value)) {
+          throw new Error(`--caller must be codex, claude, zcode, kimi-code, kimi-work, or both, received ${value}`);
         }
-        options.caller = value;
+        options.caller = value as Caller;
         break;
       }
       case "--scope": {
@@ -106,6 +110,9 @@ export function parseArgs(argv: readonly string[]): SetupOptions {
         break;
       case "--entry":
         options.entry = resolve(next());
+        break;
+      case "--output":
+        options.outputDir = resolve(next());
         break;
       case "--wait-profile": {
         const value = next();
@@ -131,7 +138,18 @@ export function parseArgs(argv: readonly string[]): SetupOptions {
   }
   if (options.dryRun && options.apply) throw new Error("choose either --dry-run or --apply, not both");
   if (!options.dryRun && !options.apply) options.dryRun = true;
+  validateCallerOptions(options);
   return options;
+}
+
+function validateCallerOptions(options: SetupOptions): void {
+  if (options.caller !== "both" && BOUNDED_CALLERS.includes(options.caller) && options.waitProfile === "long") {
+    throw new Error(`${options.caller} supports bounded waits only; native long-call acceptance and rollback are not yet verified`);
+  }
+  if (options.outputDir && options.caller !== "kimi-work") throw new Error("--output is only for the Kimi Work setup export");
+  if (options.caller === "kimi-work" && (options.scope === "project" || options.uninstall)) {
+    throw new Error("Kimi Work uses its MCP settings UI and a separate skill: export with --output, then add/remove them through the client; no project config is written");
+  }
 }
 
 /** Resolve the compiled entry script for this package. */
@@ -140,14 +158,15 @@ export function defaultEntry(): string {
 }
 
 /** The non-secret environment every installed server entry receives. */
-export function bridgeEnvironment(connectionFile: string, caller: "codex" | "claude"): Record<string, string> {
+export function bridgeEnvironment(connectionFile: string, caller: DesktopCaller): Record<string, string> {
   return {
     DSH_HOST_MODE: "desktop-paired",
     DSH_CONNECTION_FILE: connectionFile,
     DSH_BRIDGE_HOME: join(process.env.LOCALAPPDATA ?? homedir(), "DSHDesktopCowork", "bridge"),
-    DSH_CALLER_KIND: caller === "codex" ? "codex" : "claude-code",
+    DSH_CALLER_KIND: caller === "claude" ? "claude-code" : caller,
     DSH_APPROVAL_MODE: "desktop",
     DSH_MODEL_POLICY: "inherit",
+    ...(BOUNDED_CALLERS.includes(caller) ? { DSH_WAIT_PROFILE: "bounded" } : {}),
   };
 }
 
@@ -163,9 +182,28 @@ export function claudeConfigPath(scope: Scope, projectDir: string): string {
   return scope === "project" ? join(projectDir, ".mcp.json") : join(homedir(), ".claude.json");
 }
 
+/** Where ZCode keeps its MCP configuration. */
+export function zcodeConfigPath(scope: Scope, projectDir: string): string {
+  return scope === "project" ? join(projectDir, ".zcode", "config.json") : join(homedir(), ".zcode", "cli", "config.json");
+}
+
+export function kimiCodeHome(): string {
+  return resolve(process.env.KIMI_CODE_HOME?.trim() || join(homedir(), ".kimi-code"));
+}
+
+/** Kimi Code desktop and current CLI use the same engine configuration. */
+export function kimiCodeConfigPath(scope: Scope, projectDir: string): string {
+  return join(scope === "project" ? join(projectDir, ".kimi-code") : kimiCodeHome(), "mcp.json");
+}
+
 /** Where a caller's skill directory lives for one scope. */
-export function skillTarget(caller: "codex" | "claude", scope: Scope, projectDir: string): string {
+export function skillTarget(caller: DesktopCaller, scope: Scope, projectDir: string): string {
   const name = SKILL_NAMES[caller];
+  if (caller === "kimi-work") throw new Error("Kimi Work skills are inside the exported plugin, not a guessed global skill directory");
+  if (caller === "kimi-code") return join(scope === "project" ? join(projectDir, ".kimi-code") : kimiCodeHome(), "skills", name);
+  if (caller === "zcode") {
+    return join(scope === "project" ? projectDir : homedir(), ".zcode", "skills", name);
+  }
   if (caller === "codex") {
     return scope === "project" ? join(projectDir, ".agents", "skills", name) : join(homedir(), ".agents", "skills", name);
   }
@@ -295,6 +333,48 @@ export function applyClaudeEntry(content: string | undefined, entry: Record<stri
   return `${JSON.stringify({ ...parsed, mcpServers: table }, null, 2)}\n`;
 }
 
+/** Preserve ZCode settings and sibling servers while updating this server. */
+export function applyZcodeEntry(content: string | undefined, entry: Record<string, unknown> | undefined): string {
+  const object = (value: unknown, label: string): Record<string, unknown> => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`the target ZCode ${label} is not a JSON object`);
+    }
+    return value as Record<string, unknown>;
+  };
+  const parsed = content === undefined || content.trim() === "" ? {} : object(JSON.parse(content), "configuration");
+  const mcp = parsed.mcp === undefined ? {} : object(parsed.mcp, "mcp entry");
+  const servers = { ...(mcp.servers === undefined ? {} : object(mcp.servers, "mcp.servers entry")) };
+  if (entry === undefined) delete servers[SERVER_NAME];
+  else servers[SERVER_NAME] = mergeJsonServer(servers[SERVER_NAME], entry);
+  return `${JSON.stringify({ ...parsed, mcp: { ...mcp, servers } }, null, 2)}\n`;
+}
+
+function jsonObject(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} is not a JSON object`);
+  return value as Record<string, unknown>;
+}
+
+/** Keep caller-owned allowlists, enabled flags, timeout and extra environment. */
+function mergeJsonServer(previous: unknown, entry: Record<string, unknown>): Record<string, unknown> {
+  const old = previous === undefined ? {} : jsonObject(previous, "dsh_desktop entry");
+  const oldEnv = old.env === undefined ? {} : jsonObject(old.env, "dsh_desktop env");
+  const newEnv = entry.env === undefined ? {} : jsonObject(entry.env, "new dsh_desktop env");
+  return { ...old, ...entry, env: { ...oldEnv, ...newEnv } };
+}
+
+export function applyKimiCodeEntry(content: string | undefined, entry: Record<string, unknown> | undefined): string {
+  const parsed = content === undefined || content.trim() === "" ? {} : jsonObject(JSON.parse(content), "Kimi Code configuration");
+  const servers = { ...(parsed.mcpServers === undefined ? {} : jsonObject(parsed.mcpServers, "mcpServers")) };
+  if (entry === undefined) delete servers[SERVER_NAME];
+  else {
+    const merged = mergeJsonServer(servers[SERVER_NAME], entry);
+    // Existing explicit timeouts are user-owned. Only set a margin for a new entry.
+    if (merged.toolTimeoutMs === undefined) merged.toolTimeoutMs = 120_000;
+    servers[SERVER_NAME] = merged;
+  }
+  return `${JSON.stringify({ ...parsed, mcpServers: servers }, null, 2)}\n`;
+}
+
 /** Hash a file's content for the delivery record. */
 export async function fileHash(path: string): Promise<string | undefined> {
   try {
@@ -321,18 +401,19 @@ async function exists(path: string): Promise<boolean> {
  * `dsh_desktop` entry yet - both are a plain, safe upsert. `differs` means the
  * entry already exists with other content, which needs an explicit `--replace`.
  */
-function classifyExisting(caller: "codex" | "claude", before: string | undefined, rendered: string): PlannedWrite["before"] {
+function classifyExisting(caller: DesktopCaller, before: string | undefined, rendered: string): PlannedWrite["before"] {
   if (before === undefined) return "absent";
   if (before.trimEnd() === rendered.trimEnd()) return "identical";
   return hasOwnEntry(caller, before) ? "differs" : "absent";
 }
 
 /** Whether the file already carries a `dsh_desktop` entry. */
-function hasOwnEntry(caller: "codex" | "claude", content: string): boolean {
+function hasOwnEntry(caller: DesktopCaller, content: string): boolean {
   if (caller === "codex") return content.includes(CODEX_TABLE_HEADER);
   try {
-    const parsed = JSON.parse(content) as { mcpServers?: Record<string, unknown> };
-    return parsed.mcpServers !== undefined && parsed.mcpServers !== null && SERVER_NAME in parsed.mcpServers;
+    const parsed = JSON.parse(content) as { mcpServers?: Record<string, unknown>; mcp?: { servers?: Record<string, unknown> } };
+    const servers = caller === "zcode" ? parsed.mcp?.servers : parsed.mcpServers;
+    return servers !== undefined && servers !== null && SERVER_NAME in servers;
   } catch {
     return false;
   }
@@ -344,6 +425,7 @@ function hasOwnEntry(caller: "codex" | "claude", content: string): boolean {
  * @returns the plan.
  */
 export async function buildPlan(options: SetupOptions): Promise<PlanReport> {
+  validateCallerOptions(options);
   const nodePath = process.execPath;
   const entryPath = options.entry ?? defaultEntry();
   const desktop = await inspectDesktopHost();
@@ -370,21 +452,49 @@ export async function buildPlan(options: SetupOptions): Promise<PlanReport> {
     );
   }
 
-  const callers: Array<"codex" | "claude"> =
+  if (options.caller === "kimi-work") {
+    const output = options.outputDir ?? join(options.projectDir, "artifacts", "kimi-work-dsh-desktop");
+    const env = bridgeEnvironment(desktop.connectionFile ?? "<DSH_CONNECTION_FILE>", "kimi-work");
+    const manifest = {
+      name: "dsh-cowork", version: "0.1.0", description: "Delegate to the running local DSH Desktop and verify results",
+      skills: "./skills/",
+    };
+    // Installed Work 3.2.15 rejects local manifests containing MCP declarations.
+    // Keep the user-level MCP form settings separate from the skill-only source.
+    const settings = { mcpServers: { [SERVER_NAME]: { transport: "stdio", command: nodePath, args: [entryPath], env, startupTimeoutMs: 60_000, toolTimeoutMs: 120_000 } } };
+    for (const [name, value] of [["kimi.plugin.json", manifest], ["mcp-settings.json", settings]] as const) {
+      const target = join(output, name);
+      const snapshot = await readConfigSnapshot(target);
+      const content = `${JSON.stringify(value, null, 2)}\n`;
+      writes.push({ caller: "kimi-work", kind: "export", target, description: "export only; configure MCP and skill separately in Kimi Work",
+        before: !snapshot.exists ? "absent" : snapshot.content === content ? "identical" : "differs", content, expectedBefore: snapshot.exists ? snapshot.content : null });
+    }
+    writes.push({ caller: "kimi-work", kind: "skill", target: join(output, "skills", SKILL_NAMES["kimi-work"]), description: "export Kimi Work skill",
+      before: "absent", copyFrom: fileURLToPath(new URL(`../skill/${SKILL_NAMES["kimi-work"]}`, import.meta.url)) });
+    warnings.push("Kimi Work 3.2.15: local MCP plugins/local installation are disabled. Copy mcp-settings.json fields into Plugins > MCP (requires that capability); install the skill through the supported Skills/Plugin Builder path. The skill-only manifest is source material, not an installed plugin. No internal Work config is edited.");
+    return { options, writes, warnings, nodePath, entryPath, env: {}, desktop };
+  }
+
+  const callers: DesktopCaller[] =
     options.caller === "both" ? ["codex", "claude"] : [options.caller];
   for (const caller of callers) {
     const env = bridgeEnvironment(desktop.connectionFile ?? "<DSH_CONNECTION_FILE>", caller);
     if (options.waitProfile !== undefined) env.DSH_WAIT_PROFILE = options.waitProfile;
-    const configPath = caller === "codex" ? codexConfigPath(options.scope, options.projectDir) : claudeConfigPath(options.scope, options.projectDir);
-    const before = await readFile(configPath, "utf8").catch(() => undefined);
+    const configPath = caller === "codex"
+      ? codexConfigPath(options.scope, options.projectDir)
+      : caller === "zcode" ? zcodeConfigPath(options.scope, options.projectDir)
+      : caller === "kimi-code" ? kimiCodeConfigPath(options.scope, options.projectDir) : claudeConfigPath(options.scope, options.projectDir);
+    const configSnapshot = await readConfigSnapshot(configPath);
+    const before = configSnapshot.exists ? configSnapshot.content : undefined;
+    const applyJsonEntry = caller === "zcode" ? applyZcodeEntry : caller === "kimi-code" ? applyKimiCodeEntry : applyClaudeEntry;
     const rendered =
       caller === "codex"
         ? applyCodexTable(before ?? "", options.uninstall ? undefined : renderCodexBlock(nodePath, entryPath, env))
-        : applyClaudeEntry(
+        : applyJsonEntry(
             before,
             options.uninstall
               ? undefined
-              : { type: "stdio", command: nodePath, args: [entryPath], env },
+              : { ...(caller === "kimi-code" ? {} : { type: "stdio" }), command: nodePath, args: [entryPath], env },
           );
     writes.push({
       caller,
@@ -450,6 +560,7 @@ export async function applyPlan(plan: PlanReport): Promise<{ lines: string[]; ch
   const lines: string[] = [];
   const changed: string[] = [];
   const refused: string[] = [];
+  const refusedCallers = new Set<DesktopCaller>();
   // Without a published descriptor there is no real DSH_CONNECTION_FILE to write;
   // a placeholder entry would install a server that can never start. Refuse the
   // whole install (config and skill) until the connector has published once.
@@ -460,7 +571,8 @@ export async function applyPlan(plan: PlanReport): Promise<{ lines: string[]; ch
     return { lines, changed, refused };
   }
   for (const write of plan.writes) {
-    if (write.kind === "mcp-config") {
+    if (refusedCallers.has(write.caller)) continue;
+    if (write.kind === "mcp-config" || write.kind === "export") {
       if (write.before === "identical") {
         lines.push(`${write.caller}: ${write.target} already matches; no change`);
         continue;
@@ -469,6 +581,7 @@ export async function applyPlan(plan: PlanReport): Promise<{ lines: string[]; ch
         refused.push(
           `${write.caller}: ${write.target} already contains a different ${SERVER_NAME} entry; rerun with --replace to overwrite just that entry`,
         );
+        refusedCallers.add(write.caller);
         continue;
       }
       if (!plan.options.apply) {

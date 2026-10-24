@@ -1,5 +1,26 @@
 # Acceptance matrix — DSH Desktop Cowork private build
 
+## 2026-10-24 ZCode / Kimi local integration
+
+- Product strict TypeScript build PASS; portable regression **310 PASS / 0 FAIL**.
+  Six existing Windows symlink privilege cases excluded; Node's skipped=0 does
+  not count cases excluded before registration. Test-source emission still
+  reports the pre-existing typing diagnostics; this is not a clean test tsc claim.
+- Five caller skills pass quick_validate. New tests cover settings preservation,
+  bounded enforcement, project/user paths, install races/refusal, Work export,
+  target/cursor ownership, canceled, interaction/offline and observation budgets.
+- Real Desktop SDK: zcode dsh_0a5c7a90ff11, kimi-code dsh_9aa5505bf454,
+  kimi-work dsh_76030f87bba2: complete marker results and desktop-live normal
+  release; queueKnownEmpty/jobsKnownIdle were obtained from the live Host.
+- Real client UI loading, approval, interruption and background behavior remain
+  pending. Work also requires its account's user MCP settings capability.
+- Same-directory real write lifecycle PASS: ZCode dsh_42d8cae6b16e writes
+  phase1.txt, file verified before desktop-live release; Kimi Code then claims
+  that exact cwd, writes phase2.txt and releases (dsh_9ee65a787385). Both used
+  one shared isolated bridge home. No claims remain in that acceptance home.
+- Evidence: parent analysis/zcode-kimi-integration-2026-10-24, including generated
+  project configs, task receipts, full logs and the skill-only Work export.
+
 ## 2026-10-23 P3 supplement
 
 - Strict build PASS; portable full regression **293 PASS / 0 FAIL**, excluding

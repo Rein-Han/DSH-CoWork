@@ -280,6 +280,37 @@ describe("desktop-paired adapter", () => {
     assert.deepEqual(fake.calls[0], { endpoint: "session/list", args: { _request: {} } });
   });
 
+  for (const created of [false, true]) {
+    it(`${created ? "registers" : "reuses"} the cwd workspace before creating its session`, async () => {
+      const cwd = "C:\\projects\\cowork";
+      const { fake, adapter: instance } = adapter({
+        "workspace/create": { workspace: { workspaceId: "workspace-1", path: cwd }, created },
+        "session/create": { sessionId: "session-1", agentPreset: "default" },
+      });
+      const result = await instance.sessionCreate({ cwd, sessionId: "session-1", agentPreset: "default" });
+      assert.equal(result.sessionId, "session-1");
+      assert.equal(result.agentPreset, "default");
+      assert.deepEqual(fake.calls, [
+        { endpoint: "workspace/create", args: { request: { path: cwd } } },
+        { endpoint: "session/create", args: { request: { workspaceId: "workspace-1", sessionId: "session-1", agentPreset: "default" } } },
+      ]);
+    });
+  }
+
+  it("does not create an ungrouped session when workspace registration fails or returns invalid data", async () => {
+    for (const value of [new Error("workspace unavailable"), { workspace: { workspaceId: "", path: "C:\\projects" }, created: false }]) {
+      const { fake, adapter: instance } = adapter({ "workspace/create": value });
+      await assert.rejects(() => instance.sessionCreate({ cwd: "C:\\projects" }));
+      assert.deepEqual(fake.calls.map(call => call.endpoint), ["workspace/create"]);
+    }
+  });
+
+  it("refuses a workspace whose directory differs from the bridge claim cwd", async () => {
+    const { fake, adapter: instance } = adapter({ "workspace/create": { workspace: { workspaceId: "wrong", path: "C:\\other" }, created: false } });
+    await assert.rejects(() => instance.sessionCreate({ cwd: "C:\\projects" }), /different directory/);
+    assert.deepEqual(fake.calls.map(call => call.endpoint), ["workspace/create"]);
+  });
+
   it("passes the prompt requestId through so a retry can be de-duplicated", async () => {
     const { fake, adapter: instance } = adapter({ "session/prompt": { accepted: true } });
     await instance.sessionPrompt({ sessionId: "session-1", mode: "queue", content: [{ type: "text", text: "hi" }] });

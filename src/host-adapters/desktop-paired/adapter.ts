@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 
 import type { AuthSession } from "../../desktop/auth-session.js";
 import { attachDshUnaryMetadata } from "../../dsh-types.js";
@@ -30,6 +32,7 @@ import {
   sessionProjectionsResultSchema,
   workspaceInboxSchema,
   workspaceJobsSchema,
+  workspaceCreateResultSchema,
 } from "./protocol.js";
 import type { SessionEvent } from "./protocol.js";
 
@@ -187,9 +190,19 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
     signal?: AbortSignal,
   ): Promise<DshUnaryResult<{ sessionId: string; agentPreset?: string }>> {
     this.requireCapability("createSession", "creating a session");
+    const { workspace } = workspaceCreateResultSchema.parse(
+      await this.callRaw(ENDPOINTS.workspaceCreate, { request: { path: payload.cwd } }, signal),
+    );
+    const canonical = async (path: string) => {
+      const value = await realpath(path).catch(() => resolve(path));
+      return process.platform === "win32" ? value.toLowerCase() : value;
+    };
+    if (await canonical(workspace.path) !== await canonical(payload.cwd)) {
+      throw new Error("workspace/create returned a different directory; refusing to create or prompt a session against the wrong workspace");
+    }
     const result = await this.call<{ sessionId: string }>(ENDPOINTS.sessionCreate, {
       request: {
-        cwd: payload.cwd,
+        workspaceId: workspace.workspaceId,
         ...(payload.sessionId === undefined ? {} : { sessionId: payload.sessionId }),
         ...(payload.agentPreset === undefined ? {} : { agentPreset: payload.agentPreset }),
       },

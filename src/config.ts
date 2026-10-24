@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 export type HostMode = "static" | "desktop-auto" | "desktop-paired";
 
 /** Which calling client this bridge process serves. Display and attribution only — never an authorization claim. */
-export type CallerKind = "codex" | "claude-code" | "unknown";
+export type CallerKind = "codex" | "claude-code" | "zcode" | "kimi-code" | "kimi-work" | "unknown";
 
 export interface BridgeConfig {
   hostUrl: string;
@@ -96,6 +96,8 @@ function detectTimeZone(): string | undefined {
 function callerKindOf(raw: string | undefined): CallerKind {
   const value = raw?.trim().toLowerCase();
   if (value === "codex") return "codex";
+  if (value === "zcode") return "zcode";
+  if (value === "kimi-code" || value === "kimi-work") return value;
   if (value === "claude-code" || value === "claude") return "claude-code";
   return "unknown";
 }
@@ -136,6 +138,9 @@ function assertPairedEnvironmentIsClean(env: NodeJS.ProcessEnv): void {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   const waitProfile = env.DSH_WAIT_PROFILE ?? "bounded";
   if (waitProfile !== "bounded" && waitProfile !== "long") throw new BridgeConfigError("DSH_WAIT_PROFILE must be bounded or long");
+  if (waitProfile === "long" && ["zcode", "kimi-code", "kimi-work"].includes(callerKindOf(env.DSH_CALLER_KIND))) {
+    throw new BridgeConfigError("this caller supports bounded waits only until native long-call acceptance is verified");
+  }
   const allowRemoteHost = booleanEnv(env.DSH_ALLOW_REMOTE_HOST);
   const requestedHostMode = env.DSH_HOST_MODE?.trim() || "static";
   if (requestedHostMode !== "static" && requestedHostMode !== "desktop-auto" && requestedHostMode !== "desktop-paired") {

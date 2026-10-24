@@ -1,5 +1,29 @@
 # Compatibility: DSH Desktop Cowork private build
 
+## 2026-10-24 local ZCode / Kimi integration
+
+The local source now integrates the reviewed ZCode branch on top of P1–P3.
+New Desktop sessions register/reuse their cwd through workspace/create and
+carry its workspaceId into session/create; a mismatched returned path is refused.
+Existing sessions are not moved. Queue/jobs release evidence is preserved.
+
+ZCode and Kimi Code have user/project configuration installers. Kimi Code uses
+KIMI_CODE_HOME (default ~/.kimi-code), not the obsolete ~/.kimi location.
+Same-server custom fields, extra environment and tool restrictions are retained.
+Kimi Work receives separate MCP form settings and a skill-only source export:
+installed Work 3.2.15 rejects local MCP plugins and disables local installation.
+Its user MCP page is capability-gated; export does not mean native installation.
+See [Kimi guide](kimi.md) and [ZCode guide](zcode.md).
+
+All three new caller kinds are bounded-only (30 seconds). Runtime and installer
+reject long, while existing Codex/Claude behavior remains intact. Strict build,
+310 portable regression cases and five skill validators pass; six existing
+Windows symlink privilege cases are excluded. All three new caller kinds also
+passed real Desktop SDK marker tasks with desktop-live normal release.
+This does not certify native UI loading, approvals, background results or long calls.
+Evidence: parent analysis/zcode-kimi-integration-2026-10-24. No new installer
+release was built; GitHub branches were not changed. Older snapshots below are historical.
+
 ## 2026-10-23 P3 supplement
 
 P3 implementation and SDK transport checks are complete: real elapsed 150/600
