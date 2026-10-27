@@ -40,6 +40,7 @@ import { TaskStore } from "./task-store.js";
 import type { WorkspaceClaimMode } from "./workspace-claim.js";
 import { WorkspaceClaimConflictError, WorkspaceClaimStore } from "./workspace-claim.js";
 import { waitWithPolicy, compactWait, type WaitOptions } from "./wait-policy.js";
+import { adaptiveBudget, maxWaitSeconds } from "./wait-schedule.js";
 
 export interface DelegateInput {
   prompt: string;
@@ -1591,10 +1592,12 @@ export class BridgeService {
   }
 
   waitCapabilities() {
-    return { policyVersion: 2, until: ["change", "terminal"], responseMode: ["full", "compact"],
+    return { policyVersion: 3, until: ["change", "terminal"], responseMode: ["full", "compact"],
       defaults: { until: "change", responseMode: "full", timeoutSec: 30 },
+      desktopDefaults: { until: "terminal", responseMode: "compact", schedule: this.config.waitProfile === "bounded" || !this.config.waitProfile ? "fixed" : "adaptive" },
+      desktopPolicy: this.config.waitPolicy ?? "desktop",
       profile: this.config.waitProfile ?? "bounded",
-      maxTimeoutSec: this.config.waitProfile === "long" ? 900 : 30,
+      maxTimeoutSec: maxWaitSeconds(this.config.waitProfile),
       clientLongWaitVerified: false, targetStartAfterCursor: true,
       progress: { requiresToken: true, minIntervalSec: 30, unit: "elapsedSeconds" },
       cancelObservationCancelsTask: false, ledgerReads: "incremental", sharedLedgerPollMs: 1000 };
@@ -1617,6 +1620,8 @@ export class BridgeService {
     const max = options.until === "terminal" ? this.waitCapabilities().maxTimeoutSec : 30;
     if (!Number.isInteger(timeoutSec) || timeoutSec < 0 || timeoutSec > max) throw new Error(`timeoutSec must be between 0 and ${max}`);
     if (options.targetStartAfterCursor !== undefined && options.until !== "terminal") throw new Error("targetStartAfterCursor requires explicit until=terminal");
+    if ((options.adaptive || options.supervise) && options.until !== "terminal") throw new Error("adaptive/supervised observation requires until=terminal");
+    let waitSchedule: ReturnType<typeof adaptiveBudget> | undefined;
     const read = async (initial: boolean, signal: AbortSignal) => {
       signal.throwIfAborted();
       let view: Omit<ReturnType<typeof statusShape>, "finalMessage" | "contentUnavailable"> & { finalMessage: unknown; contentUnavailable: unknown } =
@@ -1647,11 +1652,20 @@ export class BridgeService {
         view = { ...view, ...final, finalMessageStatus: final.finalMessage === null ? view.finalMessageStatus : "available" };
       }
       const resultCursor = view.finalMessagePointer === null ? undefined : await this.ledger.messageAfterCursor(taskId, view.finalMessagePointer);
+      const evidence = options.supervise || options.adaptive
+        ? await this.ledger.observationEvidence(taskId, Math.max(sinceCursor ?? 0, options.targetStartAfterCursor ?? 0)) : undefined;
+      if (options.adaptive && waitSchedule === undefined) {
+        waitSchedule = adaptiveBudget(view.turn, Date.now(), evidence?.lastSteerAt);
+        waitSchedule.timeoutSec = Math.min(timeoutSec, waitSchedule.timeoutSec);
+      }
       return { ...view, observationRevision: this.connection.observationRevisionForTask?.(taskId) ?? view.connection.revision,
+        ...(waitSchedule === undefined ? {} : { waitSchedule }),
+        ...(options.supervise && evidence?.issue ? { observationIssue: evidence.issue } : {}),
         ...(start === undefined ? {} : { observedRunStartCursor: start }),
         ...(resultCursor === undefined ? {} : { finalMessageAfterCursor: resultCursor }) };
     };
     const result = await waitWithPolicy({ timeoutSec, ...(sinceCursor === undefined ? {} : { sinceCursor }), options, read,
+      ...(options.adaptive ? { selectTimeout: () => waitSchedule?.timeoutSec ?? Math.min(timeoutSec, 60) } : {}),
       wait: (cursor, revision, remaining, signal) => this.connection.waitForTaskChange(taskId, cursor, revision, remaining, signal) });
     return options.responseMode === "compact" ? compactWait(result) : result;
   }

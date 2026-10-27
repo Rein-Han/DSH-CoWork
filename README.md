@@ -2,11 +2,11 @@
 
 让 Codex / Claude Code / ZCode / Kimi Code，以及具备用户 MCP 设置入口的 Kimi Work，把任务交给你电脑上已经打开的 **DeepSeek Harness Desktop**（下文简称 DSH），然后查看进度、拿回结果、自己验收。
 
-当前源码整合了 P1–P3 修复、ZCode 接入与新会话项目归属，并新增 Kimi 接入。见 [ZCode 指南](docs/zcode.md) 和 [Kimi Code / Kimi Work 指南](docs/kimi.md)。这些本地源码改动尚未打入现有 exe 安装包。
+当前源码整合了 P1–P3 修复、ZCode 接入与新会话项目归属，并新增 Kimi 接入和自适应观察。见 [ZCode 指南](docs/zcode.md)、[Kimi Code / Kimi Work 指南](docs/kimi.md) 和 [自适应等待说明](docs/adaptive-wait.md)。现有 exe 安装包仍是旧构建；`v0.2.0` 是源码标签，不是已经更新的安装包。
 
 在调用方里说一句“把这个交给 DSH”，它会在 DSH Desktop 里新建一个会话执行任务。你可以在 DSH Desktop 里看到同一个会话和它的每一步操作，做完后由调用方检查改动和测试。
 
-> 当前是测试版，只支持 Windows，已在 DeepSeek Harness Desktop 0.2.1-rc.2（Host 协议 4）上实机连通。
+> 当前是测试版，只支持 Windows；已在 DeepSeek Harness Desktop 0.2.1-rc.2（Host 协议 4）上实机连通。后续版本需按协议能力重新核验。自适应观察尚未完成全部原生客户端验收。
 
 ## 组成
 
@@ -25,7 +25,9 @@ terminal 等待、取消观察隔离、限频进度、增量账本与共享检�
 
 需要：Windows 10/11 x64，已为当前用户安装 DeepSeek Harness Desktop，以及 ZCode、Codex 或 Claude Code。ZCode 请按 [专项指南](docs/zcode.md) 从源码安装。
 
-### 方式一：安装包（推荐）
+### 方式一：已有的旧版安装包
+
+当前 exe 不是 `v0.2.0` 源码构建。需要本标签的新功能时，使用下方的源码安装步骤；不要将旧 exe 的验收结果视为这个标签的验收。
 
 1. 从本仓库的 Releases 页面下载 `DSH-Desktop-Cowork-Setup-<版本>.exe`。安装包没有数字签名，Windows 可能弹出 SmartScreen 提示，选"更多信息 → 仍要运行"。
 2. 在托盘图标上右键退出 DeepSeek Harness Desktop（只关窗口不够）。
@@ -114,7 +116,7 @@ npm run setup-desktop -- --caller kimi-work --output .\artifacts\kimi-work-dsh-d
 
 将参数填入 Work 的 **Plugins → MCP** 设置页，再通过客户端支持的入口添加 skill。本机 Work 3.2.15 禁止本地插件携带 MCP；若账号没有 MCP 设置页，暂时无法通过此路径接入。导出成功不等于客户端已安装。详细限制和验收见 [Kimi 指南](docs/kimi.md)。
 
-ZCode、Kimi Code、Kimi Work 均使用 `terminal/compact` 和最多 30 秒的有界等待，安装器及运行时拒绝为它们启用未经验证的 `long`。`--caller both` 仍只表示 Codex 与 Claude。
+ZCode、Kimi Code、Kimi Work 默认仍使用 30 秒的有界等待。源码支持为各调用方显式配置 adaptive/long，但不代表它们的原生长调用已经验收；启用前见 [自适应等待说明](docs/adaptive-wait.md)。`--caller both` 仍只表示 Codex 与 Claude。
 
 ## 使用
 
@@ -131,9 +133,9 @@ ZCode、Kimi Code、Kimi Work 均使用 `terminal/compact` 和最多 30 秒的�
 - DSH 需要审批或向你提问时，到 DSH Desktop 里处理，调用方不会代你批准。
 - 同一实际项目根目录树同一时间只允许一个任务写入。任务验收后，桥接通过 Desktop 的实时 inbox 和 job/list 检查待处理输入及活动作业，再释放目录占用；接口缺失、状态过期或读取失败仍保留占用并报告 `workspace_state_unknown`。已验证 Desktop 0.2.1-rc.2 的完整连续写任务流程。
 
-### 监督耗额修复（2026-10-21）
+### 等待与监督策略
 
-新版两端 skill 使用 `dsh_wait(until="terminal", responseMode="compact")`：普通工具事件留在桥接内部，只有终态、待人工处理、连接/恢复异常或等待期限到达才返回。摘要用 `nextCursor` 续接；完整结果通过 `dsh_status` / `dsh_tail` 获取并验收。旧调用仍默认 `change/full`，阶段检查、steer/cancel 和历史恢复保持可用。
+新版 Desktop 独立 `dsh_wait` 默认使用 `terminal/compact` 并报告连续工具失败的候选提醒：普通工具事件留在桥接内部，终态、待人工处理、连接/恢复异常或等待期限到达才返回。摘要用 `nextCursor` 续接；完整结果通过 `dsh_status` / `dsh_tail` 获取并验收。旧 `dsh_observe`、delegate 内嵌等待和显式 legacy 路径保留原有语义。
 
 已安装旧版本时，在本源码目录构建并更新（会备份配置并保留自定义字段）：
 
@@ -143,7 +145,7 @@ npm run setup-desktop -- --caller both --scope user --wait-profile bounded --rep
 npm run setup-desktop -- --caller both --scope user --wait-profile bounded --replace --apply
 ```
 
-然后重新加载 Codex / Claude 的 MCP 服务或重启调用方；无需重装 DSH Connector。旧会话已经加载的工具和 skill 不会自动更新。默认仍为 30 秒有界等待；`--wait-profile long` 只供完成本客户端长调用、中断、并发及结果回收验证后显式启用，当前未把任一客户端标记为已验证。
+然后重新加载 Codex / Claude 的 MCP 服务或重启调用方；无需重装 DSH Connector。旧会话已经加载的工具和 skill 不会自动更新。未配置新 profile 时默认仍为 30 秒有界等待；`--wait-profile adaptive` 或 `long` 只供完成各客户端长调用、中断、并发及结果回收验证后显式启用，当前未把任一客户端标记为已验证。旧安装包仍是旧版本，不能通过这个源码标签自动升级。
 
 这些本地安装的 skill 不会出现在 Claude 桌面 app 设置里的 Skills / Plugins 页面。那两个页面管的是账号级内容。
 
@@ -184,7 +186,7 @@ npm test
 
 - 插件源码在 `packages/desktop-connector/`，打包命令：`npm pack ./packages/desktop-connector --pack-destination ./release`。
 - 安装包脚本在 `installer/`，需要 Inno Setup 6，执行 `installer\build.ps1`。脚本从 `release/` 取文件，产物输出到 `release/`（exe 不提交进仓库）。
-- 在没有开启 Windows 开发者模式的机器上，有 6 个创建符号链接的测试会失败，与功能无关。
+- 当前 Windows 机器上有 6 个安全测试因无法创建符号链接而在夹具准备阶段失败（`EPERM`）；正常用户权限复跑仍如此。这些测试尚未验证通过，不能断定对应防护功能已合格。原生 Codex 短结果交付可能排队、完成状态偶发延迟仍待定位；SDK 测试不能替代原生客户端验收。
 
 ## 来源
 

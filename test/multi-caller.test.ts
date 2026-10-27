@@ -27,13 +27,13 @@ test("new callers preserve same-entry settings and environment through install/u
   }
 });
 
-test("new caller long waits are rejected by both installer and runtime, both remains two callers",async()=>{
+test("extended profiles are caller-neutral and still require native acceptance, both remains two callers",async()=>{
   for(const caller of ["zcode","kimi-code","kimi-work"] as const){
-    assert.throws(()=>parseArgs(["--caller",caller,"--wait-profile","long"]),/bounded/);
-    assert.throws(()=>loadConfig({DSH_CALLER_KIND:caller,DSH_WAIT_PROFILE:"long"}),/bounded/);
+    assert.equal(parseArgs(["--caller",caller,"--wait-profile","long"]).waitProfile,"long");
+    assert.equal(loadConfig({DSH_CALLER_KIND:caller,DSH_WAIT_PROFILE:"adaptive"}).waitProfile,"adaptive");
     assert.equal(loadConfig({DSH_CALLER_KIND:caller}).callerKind,caller);
-    assert.equal(bridgeEnvironment("c",caller).DSH_WAIT_PROFILE,"bounded");
-    await assert.rejects(()=>buildPlan({...parseArgs(["--caller",caller]),waitProfile:"long"}),/bounded/);
+    assert.equal(bridgeEnvironment("c",caller).DSH_WAIT_PROFILE,undefined);
+    assert.equal(parseArgs(["--caller",caller,"--wait-profile","adaptive"]).waitProfile,"adaptive");
   }
   assert.equal(parseArgs(["--caller","both"]).caller,"both");
   assert.throws(()=>parseArgs(["--caller","kimi-work","--scope","project"]),/no project/);

@@ -38,8 +38,8 @@ const ROUTING_FIELDS = {
   selectionReason: true,
 } as const;
 
-function result(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+function result(value: unknown, compact = false) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(value, null, compact ? undefined : 2) }] };
 }
 
 function errorBody(error: unknown): Record<string, unknown> {
@@ -104,9 +104,9 @@ function followupOptions(input: {
   };
 }
 
-async function handled<T>(operation: () => Promise<T>) {
+async function handled<T>(operation: () => Promise<T>, compact = false) {
   try {
-    return result(await operation());
+    return result(await operation(), compact);
   } catch (error) {
     return failure(error);
   }
@@ -421,36 +421,49 @@ export function createMcpServer(service: BridgeService, options: McpServerOption
       handled(() => service.tail(taskId, sinceCursor, maxEvents, maxBytes)),
   );
 
+  const waitCaps = service.waitCapabilities?.();
+  const desktopWait = desktop && waitCaps?.desktopPolicy !== "legacy";
+  const adaptiveDefault = desktopWait && ["adaptive", "long"].includes(waitCaps?.profile ?? "bounded");
   server.registerTool(
     "dsh_wait",
     {
-      description:
-        "Wait for change (legacy default) or terminal/interaction/availability. Use until=terminal,responseMode=compact for efficient supervision; fetch the complete result with dsh_status. Bounded profile max 30s; verified opt-in long profile permits terminal waits up to 900s. Timeout never cancels DSH.",
-      inputSchema: z
-        .object({
-          taskId: taskIdSchema,
-          timeoutSec: z.number().int().min(0).max(service.waitCapabilities?.().maxTimeoutSec ?? 30).default(30),
-          sinceCursor: z.number().int().min(0).optional(),
-          until: z.enum(["change", "terminal"]).optional(),
-          responseMode: z.enum(["full", "compact"]).optional(),
-          targetStartAfterCursor: z.number().int().min(0).optional(),
-        })
-        .strict(),
+      description: "Observe DSH without canceling it. Desktop defaults: terminal/compact with supervised failures. In adaptive/long profile omit timeoutSec for run-age budgets 60/120/180/300s; important events return early. Bounded profile stays at 30s. Explicit change/full and legacy policy retain old semantics. Fetch complete final content via status/tail pointers. Keep nextCursor and targetStartAfterCursor. Acknowledge wakeKey only when deliberately continuing observation of an already-handled issue.",
+      inputSchema: z.object({
+        taskId: taskIdSchema,
+        timeoutSec: z.number().int().min(0).max(waitCaps?.maxTimeoutSec ?? 30).optional(),
+        sinceCursor: z.number().int().min(0).optional(),
+        until: z.enum(["change", "terminal"]).optional(),
+        responseMode: z.enum(["full", "compact"]).optional(),
+        schedule: z.enum(["fixed", "adaptive"]).optional(),
+        observationPolicy: z.enum(["terminal", "supervised"]).optional(),
+        acknowledgedWakeKey: z.string().regex(/^[a-f0-9]{24}$/).optional(),
+        targetStartAfterCursor: z.number().int().min(0).optional(),
+      }).strict(),
       annotations: readOnly,
     },
-    async ({ taskId, timeoutSec, sinceCursor, until, responseMode, targetStartAfterCursor }, extra) => handled(() => service.wait(taskId, timeoutSec, sinceCursor, {
-      ...(until === undefined ? {} : { until }), ...(responseMode === undefined ? {} : { responseMode }),
-      ...(targetStartAfterCursor === undefined ? {} : { targetStartAfterCursor }), signal: extra.signal,
-      ...(extra._meta?.progressToken === undefined ? {} : { progress: (progress: number) => extra.sendNotification({
-        method: "notifications/progress", params: { progressToken: extra._meta!.progressToken!, progress },
-      }) }),
-    })),
+    async (args, extra) => {
+      const until = args.until ?? (desktopWait ? "terminal" : "change");
+      const responseMode = args.responseMode ?? (desktopWait ? "compact" : "full");
+      const adaptive = args.schedule === "adaptive" || (args.schedule === undefined && args.timeoutSec === undefined && adaptiveDefault && until === "terminal");
+      return handled(async () => {
+        if (adaptive && (!adaptiveDefault || until !== "terminal")) throw new Error("adaptive schedule requires terminal observation and an enabled adaptive/long Desktop profile");
+        return service.wait(args.taskId, args.timeoutSec ?? (adaptive ? Math.min(300, waitCaps!.maxTimeoutSec) : 30), args.sinceCursor, {
+          until, responseMode, adaptive,
+          supervise: until === "terminal" && (args.observationPolicy === "supervised" || (args.observationPolicy === undefined && desktopWait)),
+          ...(args.acknowledgedWakeKey === undefined ? {} : { acknowledgedWakeKey: args.acknowledgedWakeKey }),
+          ...(args.targetStartAfterCursor === undefined ? {} : { targetStartAfterCursor: args.targetStartAfterCursor }), signal: extra.signal,
+          ...(extra._meta?.progressToken === undefined ? {} : { progress: (progress: number) => extra.sendNotification({
+            method: "notifications/progress", params: { progressToken: extra._meta!.progressToken!, progress },
+          }) }),
+        });
+      }, responseMode === "compact");
+    },
   );
 
   server.registerTool(
     "dsh_observe",
     {
-      description: "Compatibility observation alias. Prefer dsh_wait plus dsh_tail task cursors.",
+      description: "Legacy change/full observation alias, maximum 30s; does not inherit Desktop adaptive defaults. Prefer standalone dsh_wait for efficient observation.",
       inputSchema: z
         .object({
           taskId: taskIdSchema,

@@ -11,6 +11,11 @@ coverage/
 installer/stage/
 dist-test/
 artifacts/
+# Local live-Desktop acceptance probes require this machine's user config and
+# task receipts. Keep evidence locally; do not ship them in the source release.
+scripts/check-adaptive-existing-task.mjs
+scripts/check-existing-task-observers.mjs
+scripts/check-short-concurrency.mjs
 # release/ is a local runnable build; only the connector package is tracked.
 # The installer .exe is published separately, not in git.
 release/*

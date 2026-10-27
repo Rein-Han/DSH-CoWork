@@ -3,6 +3,10 @@ export interface WaitOptions {
   until?: "change" | "terminal";
   responseMode?: "full" | "compact";
   targetStartAfterCursor?: number;
+  /** Desktop observation policy only; legacy callers leave these unset. */
+  adaptive?: boolean;
+  supervise?: boolean;
+  acknowledgedWakeKey?: string;
   signal?: AbortSignal;
   /** Internal MCP progress callback, never a model/tool response. */
   progress?: (elapsedSeconds: number) => Promise<void>;
@@ -34,6 +38,7 @@ export async function waitWithPolicy<T extends WaitView>(input: {
   timeoutSec: number;
   sinceCursor?: number;
   options: WaitOptions;
+  selectTimeout?: (view: T) => number;
   read(initial: boolean, signal: AbortSignal): Promise<T>;
   wait(cursor: number, revision: number, remainingMs: number, signal: AbortSignal): Promise<unknown>;
 }) {
@@ -43,7 +48,8 @@ export async function waitWithPolicy<T extends WaitView>(input: {
   if (input.options.signal?.aborted) abort();
   // Monotonic, single deadline: ordinary events do not restart the budget.
   const started = performance.now();
-  const deadline = started + input.timeoutSec * 1000;
+  // Before a run age is known, keep initial synchronization in the short tier.
+  let deadline = started + (input.options.adaptive ? Math.min(input.timeoutSec, 60) : input.timeoutSec) * 1000;
   let progressTimer: ReturnType<typeof setTimeout> | undefined;
   let progressStopped = false;
   const stopProgress = () => { progressStopped = true; clearTimeout(progressTimer); };
@@ -81,13 +87,17 @@ export async function waitWithPolicy<T extends WaitView>(input: {
   try {
     controller.signal.throwIfAborted();
     let view = await bounded(() => input.read(true, controller.signal));
+    if (input.selectTimeout) deadline = started + Math.min(input.timeoutSec, input.selectTimeout(view)) * 1000;
     let cursor = input.sinceCursor ?? view.cursor;
     const observationRevision = (v: T) => v.observationRevision ?? v.connection.revision;
     let revision = observationRevision(view);
     for (;;) {
       controller.signal.throwIfAborted();
-      const reason = meaningfulWake(view);
-      if (reason) return { timedOut: false, wakeReason: reason, status: view, nextCursor: view.cursor };
+      const reason = meaningfulWake(view) ?? (input.options.supervise && view.observationIssue ? "supervision" : undefined);
+      const wakeKey = reason && reason !== "terminal" ? observationWakeKey(view, reason) : undefined;
+      if (reason && (wakeKey === undefined || wakeKey !== input.options.acknowledgedWakeKey)) {
+        return { timedOut: false, wakeReason: reason, status: view, nextCursor: view.cursor, ...(wakeKey ? { wakeKey } : {}) };
+      }
       if ((input.options.until ?? "change") === "change" && (view.cursor > cursor || observationRevision(view) > revision)) {
         return { timedOut: false, wakeReason: "change", status: view, nextCursor: view.cursor };
       }
@@ -115,10 +125,11 @@ export async function waitWithPolicy<T extends WaitView>(input: {
   }
 }
 
-export function compactWait(result: { timedOut: boolean; wakeReason: string; status: WaitView; nextCursor: number }) {
+export function compactWait(result: { timedOut: boolean; wakeReason: string; status: WaitView; nextCursor: number; wakeKey?: string }) {
   const s = result.status;
   const summary: Record<string, unknown> = {
     schemaVersion: 1,
+    policyVersion: 3,
     taskId: s.taskId, rootSessionId: s.rootSessionId,
     timedOut: result.timedOut, wakeReason: result.wakeReason,
     availability: s.availability, execution: s.execution, nextCursor: result.nextCursor,
@@ -128,12 +139,16 @@ export function compactWait(result: { timedOut: boolean; wakeReason: string; sta
     contentUnavailable: s.contentUnavailable,
     recovery: s.recovery, queueDepth: s.queueDepth,
     ...(s.observedRunStartCursor === undefined ? {} : { observedRunStartCursor: s.observedRunStartCursor }),
+    ...(result.wakeKey === undefined ? {} : { wakeKey: result.wakeKey }),
+    ...(s.waitSchedule === undefined ? {} : { waitSchedule: s.waitSchedule }),
+    ...(s.observationIssue === undefined ? {} : { observationIssue: s.observationIssue }),
   };
   if (s.visualFallback !== null && s.visualFallback !== undefined) summary.visualFallbackDetails = "dsh_status";
   // Content is retrieved with existing status/tail tools, never silently truncated.
   // This also bounds large questions/answers without dropping their existence.
   if (s.pendingInteractions.length) {
-    summary.pendingInteractions = s.pendingInteractions;
+    summary.pendingInteractionCount = s.pendingInteractions.length;
+    summary.pendingInteractions = s.pendingInteractions.slice(0, 4).map(interactionSummary);
     summary.pendingInteractionDetails = "dsh_status; Desktop interactions are answered in Desktop UI";
   } else {
     summary.pendingInteractions = [];
@@ -146,6 +161,25 @@ export function compactWait(result: { timedOut: boolean; wakeReason: string; sta
   if (Buffer.byteLength(JSON.stringify(summary)) > 4096) {
     summary.recovery = { state: s.recovery.state, details: "dsh_status" };
     summary.contentUnavailable = s.contentUnavailable === false ? false : { details: "dsh_status" };
+    summary.pendingInteractions = [];
+    summary.pendingInteractionDetails = "dsh_status; summaries omitted to keep this response bounded";
   }
   return summary;
+}
+
+function interactionSummary(value: unknown) {
+  const object = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return Object.fromEntries(["type", "sessionId", "requestId", "approvalId"].flatMap(key => {
+    const v = object[key];
+    // Never provide a truncated identifier that could be mistaken for a usable ID.
+    return typeof v === "string" && v.length <= 160 ? [[key, v]] : [];
+  }));
+}
+
+import { createHash } from "node:crypto";
+function observationWakeKey(view: WaitView, reason: string): string {
+  const identity = reason === "supervision" ? view.observationIssue :
+    reason === "interaction" ? view.pendingInteractions.map(interactionSummary) :
+    { availability: view.availability, recovery: view.recovery.state };
+  return createHash("sha256").update(JSON.stringify([view.taskId, reason, identity])).digest("hex").slice(0, 24);
 }

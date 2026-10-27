@@ -27,7 +27,7 @@
 ; ============================================================================
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0-alpha.5"
+  #define MyAppVersion "0.2.0"
 #endif
 #ifndef MyConnectorVersion
   #define MyConnectorVersion "1.0.1"

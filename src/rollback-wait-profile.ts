@@ -1,61 +1,65 @@
 #!/usr/bin/env node
 /** Restore only wait-profile/timeout fields from an installer backup. A later
  * user edit wins. Never restore a whole private config over unrelated changes. */
+import {assertEditableServers, parseInlineStringTable} from "./toml-edit.js";
 import {readFile} from "node:fs/promises";
 import {pathToFileURL} from "node:url";
 import {resolve} from "node:path";
 import {atomicInstallText, readConfigSnapshot} from "./setup-engine.js";
-import {codexConfigPath, claudeConfigPath} from "./setup-desktop.js";
+import {codexConfigPath, claudeConfigPath, kimiCodeConfigPath, zcodeConfigPath} from "./setup-desktop.js";
 
-function table(text: string): string | undefined {
-  return /^\[mcp_servers\.dsh_desktop\][^\r\n]*\r?\n[^]*?(?=^\s*\[|(?![^]))/m.exec(text)?.[0];
-}
-
-export function rollbackWaitConfig(caller: "codex" | "claude", current: string, backup: string): string {
-  if (caller === "claude") {
-    const now = JSON.parse(current); const before = JSON.parse(backup);
-    const entry = now.mcpServers?.dsh_desktop;
-    const old = before.mcpServers?.dsh_desktop;
+type Caller = "codex" | "claude" | "kimi-code" | "zcode";
+export function rollbackWaitConfig(caller: Caller, current: string, backup: string, installedProfile: "adaptive" | "long" = "long"): string {
+  const minimum = installedProfile === "adaptive" ? 360 : 960;
+  if (caller !== "codex") {
+    const now = JSON.parse(current), before = JSON.parse(backup);
+    const servers = (v: any) => caller === "zcode" ? v.mcp?.servers : v.mcpServers;
+    const entry = servers(now)?.dsh_desktop, old = servers(before)?.dsh_desktop;
     if (!entry || !old) throw new Error("rollback requires the dsh_desktop entry in current config and backup");
-    if (entry.env?.DSH_WAIT_PROFILE === "long") {
-      if (old.env?.DSH_WAIT_PROFILE === undefined) delete entry.env.DSH_WAIT_PROFILE;
-      else entry.env.DSH_WAIT_PROFILE = old.env.DSH_WAIT_PROFILE;
-    }
-    // This installer only raises a value below 960000. A higher user value was
-    // never owned, and any value subsequently edited must survive rollback.
-    if (entry.timeout === 960_000 && (old.timeout === undefined || old.timeout < 960_000)) {
-      if (old.timeout === undefined) delete entry.timeout;
-      else entry.timeout = old.timeout;
+    // Explicit installed profile makes a later profile change user-owned.
+    if (entry.env?.DSH_WAIT_PROFILE !== installedProfile) return current;
+    if (old.env?.DSH_WAIT_PROFILE === undefined) delete entry.env.DSH_WAIT_PROFILE;
+    else entry.env.DSH_WAIT_PROFILE = old.env.DSH_WAIT_PROFILE;
+    const key = caller === "kimi-code" ? "toolTimeoutMs" : caller === "claude" ? "timeout" : undefined;
+    if (key && entry[key] === minimum * 1000 && (old[key] === undefined || old[key] < minimum * 1000)) {
+      if (old[key] === undefined) delete entry[key]; else entry[key] = old[key];
     }
     return `${JSON.stringify(now, null, 2)}\n`;
   }
-  const present = table(current); const previous = table(backup);
-  if (!present || !previous) throw new Error("rollback requires the dsh_desktop table in current config and backup");
-  let result = present;
-  const oldProfile = /DSH_WAIT_PROFILE\s*=\s*"(bounded|long)"/.exec(previous)?.[0];
-  if (/DSH_WAIT_PROFILE\s*=\s*"long"/.test(result)) {
-    result = oldProfile ? result.replace(/DSH_WAIT_PROFILE\s*=\s*"long"/, oldProfile)
-      : result.replace(/,?\s*DSH_WAIT_PROFILE\s*=\s*"long"\s*,?/, match => match.trim().startsWith(",") && match.trim().endsWith(",") ? "," : "");
+  const fields = (text: string) => assertEditableServers(text,["dsh_desktop"]).filter(s => s.key && s.table.length === 2 && s.table[0] === "mcp_servers" && s.table[1] === "dsh_desktop");
+  const present = fields(current), previous = fields(backup);
+  if (!present.length || !previous.length) throw new Error("rollback requires the dsh_desktop table in current config and backup");
+  const env = present.find(s => s.key![0] === "env"), oldEnv = previous.find(s => s.key![0] === "env");
+  if (!env) return current;
+  const values = parseInlineStringTable(env.value!), prior = oldEnv ? parseInlineStringTable(oldEnv.value!) : new Map<string,string>();
+  if (values.get("DSH_WAIT_PROFILE") !== JSON.stringify(installedProfile)) return current;
+  if (prior.has("DSH_WAIT_PROFILE")) values.set("DSH_WAIT_PROFILE", prior.get("DSH_WAIT_PROFILE")!); else values.delete("DSH_WAIT_PROFILE");
+  const edits = [{start:env.start,end:env.end,text:`env = { ${[...values].map(([k,v])=>`${/^[A-Za-z0-9_-]+$/.test(k)?k:JSON.stringify(k)} = ${v}`).join(", ")} }`}];
+  const timeout = present.find(s=>s.key![0]==="tool_timeout_sec"), oldTimeout = previous.find(s=>s.key![0]==="tool_timeout_sec");
+  const numeric = (v: string) => Number(v.split("#")[0]!.trim().replaceAll("_",""));
+  if (timeout && numeric(timeout.value!)===minimum && (!oldTimeout || numeric(oldTimeout.value!)<minimum)) {
+    edits.push({start:timeout.start,end:timeout.end,text:oldTimeout?`tool_timeout_sec = ${oldTimeout.value}`:""});
   }
-  const oldTimeout = /^\s*tool_timeout_sec\s*=\s*(\d+)[^\r\n]*/m.exec(previous);
-  if ((oldTimeout === null || Number(oldTimeout[1]) < 960) && /^\s*tool_timeout_sec\s*=\s*960\s*(?:#.*)?$/m.test(result)) {
-    result = result.replace(/^\s*tool_timeout_sec\s*=\s*960[^\r\n]*\r?\n?/m, oldTimeout ? `${oldTimeout[0].trimStart()}\n` : "");
-  }
-  return current.replace(present, result);
+  const lines=current.split(/\r?\n/);
+  for (const edit of edits.sort((a,b)=>b.start-a.start)) lines.splice(edit.start,edit.end-edit.start,...(edit.text?[edit.text]:[]));
+  return lines.join("\n");
 }
 
 async function main() {
   const args = process.argv.slice(2);
   const value = (key: string) => args[args.indexOf(key) + 1];
   const caller = value("--caller"); const backup = value("--backup");
-  if (!args.includes("--caller") || !["codex", "claude"].includes(caller ?? "") || !args.includes("--backup") || !backup) throw new Error("use --caller codex|claude --backup <installer backup> [--project <directory>] [--apply]");
+  if (!args.includes("--caller") || !["codex", "claude", "kimi-code", "zcode"].includes(caller ?? "") || !args.includes("--backup") || !backup) throw new Error("use --caller codex|claude|kimi-code|zcode --backup <installer backup> [--profile adaptive|long] [--project <directory>] [--apply]");
   const project = args.includes("--project") ? value("--project") : undefined;
   if (args.includes("--project") && !project) throw new Error("--project requires a directory");
   const scope = project ? "project" : "user";
-  const path = caller === "codex" ? codexConfigPath(scope, resolve(project ?? ".")) : claudeConfigPath(scope, resolve(project ?? "."));
+  const getPath = caller === "codex" ? codexConfigPath : caller === "kimi-code" ? kimiCodeConfigPath : caller === "zcode" ? zcodeConfigPath : claudeConfigPath;
+  const path = getPath(scope, resolve(project ?? "."));
+  const profile = args.includes("--profile") ? value("--profile") : "long";
+  if (profile !== "adaptive" && profile !== "long") throw new Error("--profile must be adaptive or long");
   const snapshot = await readConfigSnapshot(path);
   if (!snapshot.exists) throw new Error("current config is missing");
-  const content = rollbackWaitConfig(caller as "codex" | "claude", snapshot.content, await readFile(resolve(backup), "utf8"));
+  const content = rollbackWaitConfig(caller as Caller, snapshot.content, await readFile(resolve(backup), "utf8"), profile);
   if (content === snapshot.content) { console.log("no owned wait fields to restore"); return; }
   if (!args.includes("--apply")) { console.log(`would restore owned wait fields in ${path}; later user edits are preserved`); return; }
   const result = await atomicInstallText({path, content, expected:snapshot, backupLabel:"dsh-wait-rollback"});

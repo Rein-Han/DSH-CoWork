@@ -41,7 +41,7 @@ test("interactions, availability and recovery interrupt terminal waiting", async
       wait: async () => { assert.fail("meaningful state must return immediately"); } });
     assert.equal(result.wakeReason, reason);
     const compact = compactWait(result);
-    if (reason === "interaction") assert.deepEqual(compact.pendingInteractions, patch.pendingInteractions);
+    if (reason === "interaction") assert.deepEqual(compact.pendingInteractions, [{ requestId: "q1" }]);
   }
 });
 
@@ -89,6 +89,24 @@ async function fixture() {
     raw: { type: "session/event", sessionId: task.rootSessionId, event: { type, seq, time: seq, data } } });
   return { home, api, ledger, connection, service, task, event };
 }
+
+test("supervised queued target does not inherit an earlier run's failure alert", async () => {
+  const f = await fixture();
+  try {
+    await f.event("turn/start");
+    for (let i = 0; i < 3; i++) await f.event("tool/result", { error: true });
+    await f.event("turn/end", { reason: { kind: "completed" } });
+    f.connection.lineage[0]!.running = false;
+    const next = await f.service.continueTask(f.task.taskId, "new independent stage", "queue");
+    const result: any = await f.service.wait(f.task.taskId, 0, undefined, {
+      until: "terminal", responseMode: "compact", supervise: true,
+      targetStartAfterCursor: next.waitTarget!.targetStartAfterCursor,
+    });
+    assert.equal(result.wakeReason, "timeout");
+    assert.equal(result.execution, "starting");
+    assert.equal(result.observationIssue, undefined);
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
 
 test("queued target excludes old completion; restart retains binding; ambiguity fails closed", async () => {
   const f = await fixture();
@@ -167,11 +185,12 @@ test("real MCP schemas support both profiles, preserve old shape and enforce bou
         const text = (r.content as any)[0].text;
         return { raw: r, body: text.startsWith("{") ? JSON.parse(text) : { message: text } };
       };
-      assert.ok((await call({})).body.status);
+      assert.equal(Boolean((await call({})).body.status), toolProfile === "legacy");
+      assert.ok((await call({ until: "change", responseMode: "full" })).body.status);
       const compact = await call({ until: "terminal", responseMode: "compact" });
       assert.equal(compact.body.schemaVersion, 1); assert.equal(compact.body.status, undefined);
       assert.equal((await call({ timeoutSec: 31 })).raw.isError, true);
-      assert.equal((await call({ targetStartAfterCursor: 0 })).raw.isError, true);
+      assert.equal((await call({ until: "change", targetStartAfterCursor: 0 })).raw.isError, true);
       const listed = await client.listTools();
       assert.equal(listed.tools.some(t => t.name === "dsh_answer_question"), toolProfile === "legacy");
     } finally { await client.close(); await server.close(); await rm(f.home, { recursive: true, force: true }); }

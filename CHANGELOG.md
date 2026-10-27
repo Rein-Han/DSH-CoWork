@@ -1,10 +1,28 @@
 # Changelog
 
-This file records user-visible changes to Codex-DSH-Orchestrator. The project
+This file records user-visible changes to DSH-CoWork. The project
 is distributed as source code; `package.json` remains private and this file
 does not announce an npm publication.
 
 ## Unreleased
+
+## 0.2.0 — adaptive Desktop observation source (2026-10-27)
+
+- Desktop standalone `dsh_wait` now defaults to terminal/compact with supervised
+  failure candidates; legacy entry points retain their existing defaults.
+- Opt-in adaptive profile chooses 60/120/180/300-second observation windows by
+  run age and returns early for terminal or actionable events. Installed clients
+  stay bounded until separately configured and natively validated.
+- Compact summaries retain result pointers and bounded interaction identities;
+  sanitized ledger evidence supports restart-safe tool-failure supervision.
+- Desktop and legacy Codex TOML guards recognize quoted keys and root scope;
+  installer profiles preserve unrelated settings and support targeted rollback.
+- Source build and 338 of 344 tests pass on the local Windows machine. Six
+  symlink-security fixtures cannot create links (`EPERM`), even on a normal user
+  rerun. Native Codex result-delivery queuing and an intermittent completion
+  refresh delay remain open; SDK evidence is not native-client acceptance.
+- The existing installer executable and local runtime payload are older builds;
+  this Git tag does not rebuild or publish them.
 
 ## DSH-CoWork 0.1.0-alpha.5 — DSH Desktop build (2026-10-19)
 

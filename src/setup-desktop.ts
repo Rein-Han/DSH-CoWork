@@ -22,6 +22,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 
+import { assertEditableServers, decodeTomlKey, tomlHeader, tomlStatements, parseInlineStringTable } from "./toml-edit.js";
 import { atomicInstallText, readConfigSnapshot } from "./setup-engine.js";
 import { inspectDesktopHost } from "./desktop/doctor-desktop.js";
 
@@ -32,7 +33,7 @@ export type Scope = "user" | "project";
 export const SERVER_NAME = "dsh_desktop";
 export const LEGACY_SERVER_NAMES = ["dsh_agentlink", "dsh_collab"] as const;
 const SKILL_NAMES = { codex: "codex-dsh-desktop", claude: "claude-dsh-desktop", zcode: "zcode-dsh-desktop", "kimi-code": "kimi-code-dsh-desktop", "kimi-work": "kimi-work-dsh-desktop" } as const;
-export const BOUNDED_CALLERS: readonly DesktopCaller[] = ["zcode", "kimi-code", "kimi-work"];
+export const BOUNDED_CALLERS: readonly DesktopCaller[] = []; // Compatibility export; capabilities are not inferred from caller names.
 
 export interface SetupOptions {
   caller: Caller;
@@ -44,7 +45,7 @@ export interface SetupOptions {
   projectDir: string;
   /** Override the entry script; defaults to this package's compiled index.js. */
   entry?: string;
-  waitProfile?: "bounded" | "long";
+  waitProfile?: "bounded" | "adaptive" | "long";
   /** Kimi Work exports MCP form settings and a separate skill-only plugin source. */
   outputDir?: string;
 }
@@ -116,7 +117,7 @@ export function parseArgs(argv: readonly string[]): SetupOptions {
         break;
       case "--wait-profile": {
         const value = next();
-        if (value !== "bounded" && value !== "long") throw new Error("--wait-profile must be bounded or long");
+        if (value !== "bounded" && value !== "adaptive" && value !== "long") throw new Error("--wait-profile must be bounded, adaptive or long");
         options.waitProfile = value;
         break;
       }
@@ -143,9 +144,6 @@ export function parseArgs(argv: readonly string[]): SetupOptions {
 }
 
 function validateCallerOptions(options: SetupOptions): void {
-  if (options.caller !== "both" && BOUNDED_CALLERS.includes(options.caller) && options.waitProfile === "long") {
-    throw new Error(`${options.caller} supports bounded waits only; native long-call acceptance and rollback are not yet verified`);
-  }
   if (options.outputDir && options.caller !== "kimi-work") throw new Error("--output is only for the Kimi Work setup export");
   if (options.caller === "kimi-work" && (options.scope === "project" || options.uninstall)) {
     throw new Error("Kimi Work uses its MCP settings UI and a separate skill: export with --output, then add/remove them through the client; no project config is written");
@@ -166,7 +164,6 @@ export function bridgeEnvironment(connectionFile: string, caller: DesktopCaller)
     DSH_CALLER_KIND: caller === "claude" ? "claude-code" : caller,
     DSH_APPROVAL_MODE: "desktop",
     DSH_MODEL_POLICY: "inherit",
-    ...(BOUNDED_CALLERS.includes(caller) ? { DSH_WAIT_PROFILE: "bounded" } : {}),
   };
 }
 
@@ -220,7 +217,7 @@ export function renderCodexBlock(nodePath: string, entry: string, env: Record<st
     `command = ${JSON.stringify(nodePath)}`,
     `args = [${JSON.stringify(entry)}]`,
     "startup_timeout_sec = 60",
-    `tool_timeout_sec = ${env.DSH_WAIT_PROFILE === "long" ? 960 : 120}`,
+    `tool_timeout_sec = ${env.DSH_WAIT_PROFILE === "long" ? 960 : env.DSH_WAIT_PROFILE === "adaptive" ? 360 : 120}`,
     `env = { ${Object.entries(env).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(", ")} }`,
     "",
   ].join("\n");
@@ -230,19 +227,9 @@ export function renderCodexBlock(nodePath: string, entry: string, env: Record<st
 export const CODEX_TABLE_HEADER = `[mcp_servers.${SERVER_NAME}]`;
 
 function mergeInlineEnv(oldValue: string, newValue: string): string {
-  const parse = (value: string) => {
-    const entries = new Map<string, string>();
-    const body = value.trim().replace(/^\{/, "").replace(/\}\s*(?:#.*)?$/, "");
-    const rest = body.replace(/([A-Za-z0-9_]+)\s*=\s*("(?:\\.|[^"\\])*"|'[^']*')/g, (_, key: string, literal: string) => {
-      if (entries.has(key)) throw new Error("duplicate environment key; review configuration manually");
-      entries.set(key, literal); return "";
-    });
-    if (rest.replace(/[,\s]/g, "") !== "") throw new Error("unsupported TOML environment syntax; configuration was not changed");
-    return entries;
-  };
-  const merged = parse(oldValue);
-  for (const [k, v] of parse(newValue)) merged.set(k, v);
-  return `{ ${[...merged].map(([k, v]) => `${k} = ${v}`).join(", ")} }`;
+  const merged = parseInlineStringTable(oldValue);
+  for (const [k, v] of parseInlineStringTable(newValue)) merged.set(k, v);
+  return `{ ${[...merged].map(([k, v]) => `${/^[A-Za-z0-9_-]+$/.test(k) ? k : JSON.stringify(k)} = ${v}`).join(", ")} }`;
 }
 
 /**
@@ -252,45 +239,49 @@ function mergeInlineEnv(oldValue: string, newValue: string): string {
  * @returns the updated content.
  */
 export function applyCodexTable(content: string, block: string | undefined): string {
+  const statements = assertEditableServers(content, [SERVER_NAME]);
   const lines = content.split(/\r?\n/u);
-  const start = lines.findIndex((line) => line.trim() === CODEX_TABLE_HEADER);
-  if (start === -1) {
-    if (block === undefined) return content;
+  const owned = statements.filter(s => s.header && s.table[0] === "mcp_servers" && s.table[1] === SERVER_NAME);
+  if (block === undefined) {
+    const remove = new Set<number>();
+    for (const section of owned) {
+      const end = statements.find(s => s.header && s.start > section.start)?.start ?? lines.length;
+      for (let i = section.start; i < end; i++) remove.add(i);
+    }
+    return owned.length ? lines.filter((_, i) => !remove.has(i)).join("\n").trimEnd() + "\n" : content;
+  }
+  // Fail safely for nested env rather than emitting an inline table that seals it.
+  if (owned.some(s => s.table[2] === "env")) throw new Error("nested dsh_desktop.env table requires manual merge; configuration was not changed");
+  const section = owned.find(s => s.table.length === 2);
+  if (!section) {
     const prefix = content.trimEnd();
     return `${prefix === "" ? "" : `${prefix}\n\n`}${block}`;
   }
-  let end = start + 1;
-  while (end < lines.length && !/^\s*\[/u.test(lines[end] ?? "")) end += 1;
-  const head = lines.slice(0, start);
-  const tail = lines.slice(end);
-  if (block === undefined) {
-    const merged = [...head, ...tail].join("\n").replace(/\n{3,}/gu, "\n\n").trimEnd();
-    return merged === "" ? "" : `${merged}\n`;
+  const end = statements.find(s => s.header && s.start > section.start)?.start ?? lines.length;
+  const fields = statements.filter(s => s.key && s.start > section.start && s.start < end);
+  const incoming = tomlStatements(block).filter(s => s.key);
+  const edits: Array<{ start: number; end: number; text: string }> = [], added: string[] = [];
+  for (const next of incoming) {
+    const key = next.key![0]!;
+    const matches = fields.filter(s => s.key![0] === key);
+    if (matches.length > 1 || matches.some(s => s.key!.length !== 1)) throw new Error("duplicate/dotted server field requires manual merge");
+    const previous = matches[0];
+    let value = next.value!;
+    if (previous) {
+      if (key === "env") value = mergeInlineEnv(previous.value!, value);
+      else if (key === "tool_timeout_sec" && /DSH_WAIT_PROFILE = "(?:long|adaptive)"/.test(block)) {
+        const prior = Number(previous.value!.split("#")[0]!.trim().replaceAll("_", ""));
+        if (!Number.isFinite(prior) || prior < 0) throw new Error("unsupported tool_timeout_sec syntax; configuration was not changed");
+        value = String(Math.max(prior, Number(value)));
+      } else if (key !== "command" && key !== "args") continue;
+      edits.push({ start: previous.start, end: previous.end, text: `${key} = ${value}` });
+    } else added.push(`${key} = ${value}`);
   }
-  const existing = lines.slice(start + 1, end);
-  const incoming = block.trimEnd().split("\n").slice(1);
-  // Preserve user-owned settings and env variables, including approval/allowlists.
-  for (const line of incoming) {
-    const match = /^([A-Za-z_]+)\s*=\s*(.*)$/.exec(line);
-    if (!match) continue;
-    const key = match[1]!;
-    const index = existing.findIndex(row => new RegExp(`^\\s*${key}\\s*=`).test(row));
-    if (index < 0) { existing.push(line); continue; }
-    if (key === "env") {
-      existing[index] = `env = ${mergeInlineEnv(existing[index]!.replace(/^\s*env\s*=\s*/, ""), match[2]!)}`;
-    } else if (key === "command" || key === "args") {
-      existing[index] = line;
-    } else if (key === "tool_timeout_sec" && /DSH_WAIT_PROFILE = "long"/.test(block)) {
-      const prior = Number(existing[index]!.split("=")[1]?.split("#")[0]?.trim());
-      if (!Number.isFinite(prior)) throw new Error("unsupported tool_timeout_sec syntax; configuration was not changed");
-      existing[index] = `tool_timeout_sec = ${Math.max(prior, 960)}`;
-    }
-  }
-  if (tail.some(row => row.trim() === `[mcp_servers.${SERVER_NAME}.env]`)) {
-    throw new Error("nested dsh_desktop.env table requires manual merge; configuration was not changed");
-  }
-  const merged = [...head, CODEX_TABLE_HEADER, ...existing, ...tail].join("\n");
-  return `${merged.replace(/\n{3,}/gu, "\n\n").trimEnd()}\n`;
+  if (added.length) edits.push({ start: end, end, text: added.join("\n") });
+  for (const edit of edits.sort((a, b) => b.start - a.start)) lines.splice(edit.start, edit.end - edit.start, edit.text);
+  const merged = lines.join("\n").trimEnd() + "\n";
+  assertEditableServers(merged, [SERVER_NAME]);
+  return merged;
 }
 
 /**
@@ -322,11 +313,11 @@ export function applyClaudeEntry(content: string | undefined, entry: Record<stri
     const old = (previous ?? {}) as Record<string, unknown>;
     if (old.env !== undefined && (old.env === null || typeof old.env !== "object" || Array.isArray(old.env))) throw new Error("dsh_desktop env is not an object");
     const merged: Record<string, unknown> = { ...old, ...entry, env: { ...(old.env as object ?? {}), ...(entry.env as object ?? {}) } };
-    if ((entry.env as Record<string, unknown> | undefined)?.DSH_WAIT_PROFILE === "long") {
+    if (["long", "adaptive"].includes(String((entry.env as Record<string, unknown> | undefined)?.DSH_WAIT_PROFILE))) {
       if (old.timeout !== undefined && (typeof old.timeout !== "number" || !Number.isFinite(old.timeout) || old.timeout < 0)) {
         throw new Error("unsupported Claude per-server timeout; configuration was not changed");
       }
-      merged.timeout = Math.max(typeof old.timeout === "number" ? old.timeout : 0, 960_000);
+      merged.timeout = Math.max(typeof old.timeout === "number" ? old.timeout : 0, (entry.env as Record<string, unknown>).DSH_WAIT_PROFILE === "long" ? 960_000 : 360_000);
     }
     table[SERVER_NAME] = merged;
   }
@@ -368,8 +359,13 @@ export function applyKimiCodeEntry(content: string | undefined, entry: Record<st
   if (entry === undefined) delete servers[SERVER_NAME];
   else {
     const merged = mergeJsonServer(servers[SERVER_NAME], entry);
-    // Existing explicit timeouts are user-owned. Only set a margin for a new entry.
-    if (merged.toolTimeoutMs === undefined) merged.toolTimeoutMs = 120_000;
+    const profile = (entry.env as Record<string, unknown> | undefined)?.DSH_WAIT_PROFILE;
+    const minimum = profile === "long" ? 960_000 : profile === "adaptive" ? 360_000 : 120_000;
+    if (merged.toolTimeoutMs === undefined) merged.toolTimeoutMs = minimum;
+    else if (profile === "long" || profile === "adaptive") {
+      if (typeof merged.toolTimeoutMs !== "number" || !Number.isFinite(merged.toolTimeoutMs) || merged.toolTimeoutMs < 0) throw new Error("unsupported Kimi toolTimeoutMs; configuration was not changed");
+      merged.toolTimeoutMs = Math.max(merged.toolTimeoutMs, minimum);
+    }
     servers[SERVER_NAME] = merged;
   }
   return `${JSON.stringify({ ...parsed, mcpServers: servers }, null, 2)}\n`;
@@ -409,7 +405,7 @@ function classifyExisting(caller: DesktopCaller, before: string | undefined, ren
 
 /** Whether the file already carries a `dsh_desktop` entry. */
 function hasOwnEntry(caller: DesktopCaller, content: string): boolean {
-  if (caller === "codex") return content.includes(CODEX_TABLE_HEADER);
+  if (caller === "codex") return assertEditableServers(content, [SERVER_NAME]).some(s => s.header && s.table[0] === "mcp_servers" && s.table[1] === SERVER_NAME);
   try {
     const parsed = JSON.parse(content) as { mcpServers?: Record<string, unknown>; mcp?: { servers?: Record<string, unknown> } };
     const servers = caller === "zcode" ? parsed.mcp?.servers : parsed.mcpServers;
@@ -455,13 +451,14 @@ export async function buildPlan(options: SetupOptions): Promise<PlanReport> {
   if (options.caller === "kimi-work") {
     const output = options.outputDir ?? join(options.projectDir, "artifacts", "kimi-work-dsh-desktop");
     const env = bridgeEnvironment(desktop.connectionFile ?? "<DSH_CONNECTION_FILE>", "kimi-work");
+    env.DSH_WAIT_PROFILE = options.waitProfile ?? "bounded";
     const manifest = {
       name: "dsh-cowork", version: "0.1.0", description: "Delegate to the running local DSH Desktop and verify results",
       skills: "./skills/",
     };
     // Installed Work 3.2.15 rejects local manifests containing MCP declarations.
     // Keep the user-level MCP form settings separate from the skill-only source.
-    const settings = { mcpServers: { [SERVER_NAME]: { transport: "stdio", command: nodePath, args: [entryPath], env, startupTimeoutMs: 60_000, toolTimeoutMs: 120_000 } } };
+    const settings = { mcpServers: { [SERVER_NAME]: { transport: "stdio", command: nodePath, args: [entryPath], env, startupTimeoutMs: 60_000, toolTimeoutMs: env.DSH_WAIT_PROFILE === "long" ? 960_000 : env.DSH_WAIT_PROFILE === "adaptive" ? 360_000 : 120_000 } } };
     for (const [name, value] of [["kimi.plugin.json", manifest], ["mcp-settings.json", settings]] as const) {
       const target = join(output, name);
       const snapshot = await readConfigSnapshot(target);
@@ -475,6 +472,7 @@ export async function buildPlan(options: SetupOptions): Promise<PlanReport> {
     return { options, writes, warnings, nodePath, entryPath, env: {}, desktop };
   }
 
+  if (options.waitProfile && options.waitProfile !== "bounded") warnings.push("Extended wait profile requested. Configuration is not native-client acceptance: verify duration, early events, user interrupts, concurrency and result retrieval. ZCode timeout support must be checked in its own client; no undocumented timeout key is inserted.");
   const callers: DesktopCaller[] =
     options.caller === "both" ? ["codex", "claude"] : [options.caller];
   for (const caller of callers) {

@@ -25,7 +25,8 @@ export interface BridgeConfig {
   /** Model policy: inherit the Host's own selection, never override it. */
   modelPolicy?: "inherit";
   /** Opt-in only after the calling client's long-call behaviour has been verified. */
-  waitProfile?: "bounded" | "long";
+  waitProfile?: "bounded" | "adaptive" | "long";
+  waitPolicy?: "desktop" | "legacy";
 }
 
 const DEFAULT_HOST_URL = "http://127.0.0.1:3080";
@@ -137,10 +138,9 @@ function assertPairedEnvironmentIsClean(env: NodeJS.ProcessEnv): void {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   const waitProfile = env.DSH_WAIT_PROFILE ?? "bounded";
-  if (waitProfile !== "bounded" && waitProfile !== "long") throw new BridgeConfigError("DSH_WAIT_PROFILE must be bounded or long");
-  if (waitProfile === "long" && ["zcode", "kimi-code", "kimi-work"].includes(callerKindOf(env.DSH_CALLER_KIND))) {
-    throw new BridgeConfigError("this caller supports bounded waits only until native long-call acceptance is verified");
-  }
+  if (!["bounded", "adaptive", "long"].includes(waitProfile)) throw new BridgeConfigError("DSH_WAIT_PROFILE must be bounded, adaptive or long");
+  const waitPolicy = env.DSH_WAIT_POLICY ?? "desktop";
+  if (waitPolicy !== "desktop" && waitPolicy !== "legacy") throw new BridgeConfigError("DSH_WAIT_POLICY must be desktop or legacy");
   const allowRemoteHost = booleanEnv(env.DSH_ALLOW_REMOTE_HOST);
   const requestedHostMode = env.DSH_HOST_MODE?.trim() || "static";
   if (requestedHostMode !== "static" && requestedHostMode !== "desktop-auto" && requestedHostMode !== "desktop-paired") {
@@ -201,6 +201,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     callerKind: callerKindOf(env.DSH_CALLER_KIND),
     approvalMode: "desktop",
     modelPolicy: "inherit",
-    waitProfile,
+    waitProfile: waitProfile as NonNullable<BridgeConfig["waitProfile"]>,
+    waitPolicy,
   };
 }

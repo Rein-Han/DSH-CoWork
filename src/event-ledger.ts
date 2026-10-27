@@ -2,6 +2,9 @@ import { appendFile, chmod, mkdir, open, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { withFileLock } from "./file-lock.js";
+import { WaitEvidenceIndex } from "./wait-evidence.js";
+
+const waitEvidence = new WeakMap<object, WaitEvidenceIndex>();
 
 export type LedgerOrigin = "root" | "subagent";
 
@@ -250,8 +253,10 @@ function safeTurnData(event: unknown): Record<string, unknown> | undefined {
   const data = asObject(asObject(event)?.data);
   const turn = numberField(data, "turn");
   const reason = safeReason(data?.reason);
-  if (turn === undefined && reason === undefined) return undefined;
-  return { ...(turn === undefined ? {} : { turn }), ...(reason === undefined ? {} : { reason }) };
+  // Observation only: retain a success/failure bit, never tool output or error text.
+  const error = asObject(event)?.type === "tool/result" && data !== undefined ? Boolean(data.error) : undefined;
+  if (turn === undefined && reason === undefined && error === undefined) return undefined;
+  return { ...(turn === undefined ? {} : { turn }), ...(reason === undefined ? {} : { reason }), ...(error === undefined ? {} : { error }) };
 }
 
 function safePayloadFields(raw: unknown): Record<string, unknown> {
@@ -1035,6 +1040,15 @@ export class EventLedger {
       throw Object.assign(new Error("completed run lacks prompt attribution evidence; inspect dsh_tail before acceptance"), { code: "unverified_wait_target" });
     }
     return { startCursor: starts[0], snapshot: structuredClone(state.fold.snapshot) };
+  }
+
+  async observationEvidence(taskId: string, sinceCursor = 0) {
+    const state = await this.readLocked(taskId);
+    const index = waitEvidence.get(state) ?? new WaitEvidenceIndex();
+    index.update(state.records);
+    waitEvidence.set(state, index);
+    return { lastSteerAt: index.lastSteerAt,
+      ...(index.issue && index.issue.cursor > sinceCursor ? { issue: { ...index.issue } } : {}) };
   }
 
   async messageAfterCursor(taskId: string, pointer: LedgerEventPointer): Promise<number | undefined> {

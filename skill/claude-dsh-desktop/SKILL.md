@@ -115,12 +115,23 @@ useful progress updates. There is no fixed number of timeouts after which to qui
 Keep the task and cursor if the client genuinely cannot continue; do not claim
 background notifications exist. Canceling observation does not cancel DSH.
 
-Keep 30 seconds unless this particular client's long calls, interrupts, concurrent
-tools and result retrieval have been verified and its bridge profile explicitly
-enables long waits. A configured limit alone is not verification.
-Once both conditions hold, use `timeoutSec:900` for an independent long task;
-choose a shorter window for a planned inspection or unverified multi-task scenario.
-The default remains 30 even in long mode, so select the duration explicitly.
+For a natively verified client with profile `adaptive` (or `long`), replace
+`timeoutSec:30` above with `schedule:"adaptive",observationPolicy:"supervised"`.
+The bridge selects 60/120/180/300 seconds at run ages <5/5–10/10–15/≥15 minutes.
+It watches events continuously and returns early for completion, interaction,
+connection/recovery problems or three consecutive observed tool failures.
+Each new queued run starts its own age; recent steer keeps 60 seconds for two minutes.
+Keep `timeoutSec:30` (30 seconds) on bounded/unverified clients; never infer verification from
+configuration or an SDK test. An explicit shorter timeout is available for a planned
+stage review. Legacy `dsh_observe` and delegate's embedded wait stay change/full;
+use standalone `dsh_wait` for the new policy. Explicit change/full remains supported.
+At each adaptive timeout, assess the current stage; request only needed incremental
+`dsh_tail` evidence, not unconditional full status/history. Successful tools alone
+do not prove correct direction. A `supervision` wake is a candidate problem, not
+a task failure: inspect evidence and decide whether guidance is needed.
+Advance `sinceCursor` to acknowledge inspected failures. Do not hot-loop an unchanged
+interaction/fault; if deliberately waiting after handling it, pass its `wakeKey` as
+`acknowledgedWakeKey`. Never wait again after an accepted terminal result.
 Progress notifications do not extend the caller's hard timeout. If a wait is
 backgrounded, retain its caller task handle and collect that result; do not start
 another wait while it is pending. After observer cancellation or client timeout,

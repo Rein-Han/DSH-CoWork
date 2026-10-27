@@ -1,8 +1,8 @@
 {
   "name": "dsh-desktop-cowork",
-  "version": "0.1.0-alpha.5",
+  "version": "0.2.0",
   "private": true,
-  "description": "Private local bridge that lets Codex and Claude Code hand tasks to the user's running DeepSeek Harness Desktop over the dsh_desktop MCP server. Derived from Codex-DSH-Orchestrator / dsh-Agentlink.",
+  "description": "Private local bridge for Codex, Claude Code, ZCode and Kimi Code to use the running DeepSeek Harness Desktop. Derived from Codex-DSH-Orchestrator / dsh-Agentlink.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -29,7 +29,7 @@
     "docs/",
     "skill/",
     "README.md",
-        "CONTRIBUTING.md",
+    "CONTRIBUTING.md",
     "SECURITY.md",
     "KNOWN_ISSUES.md",
     "LICENSE",
@@ -71,4 +71,3 @@
     "ws": "^8.18.3"
   }
 }
-

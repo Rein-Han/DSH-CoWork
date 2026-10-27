@@ -14,7 +14,8 @@ description: 在 Kimi Work 中通过 dsh_desktop MCP 将任务交给本机正在
 
 本机 Work 3.2.15 禁止本地 MCP 插件。项目安装器导出 mcp-settings.json 的用户级 MCP 表单参数和独立 skill；通过插件中心的 MCP 设置页添加服务，通过支持的技能上传或 Plugin Builder 个人插件流程安装 skill。没有 MCP 页签时报告当前客户端能力不足，不修改 daimon 私有配置或猜测 .kimi-work/mcp.json。导出文件存在不代表已经安装。
 
-本接入只启用 bounded，单次最多 30 秒；不要设置 long 或请求 900 秒。
+默认 bounded 单次最多 30 秒；原生客户端长调用验收通过后可启用 adaptive。
+不按客户端名称禁止 long；配置成功不代表原生长调用、插话与结果回收已验收。
 Kimi/ZCode 的原生后台、插话及长调用尚未验收，不能根据 SDK 成功推断已支持。
 
 ## 角色边界与委派规模
@@ -63,6 +64,16 @@ Kimi/ZCode 的原生后台、插话及长调用尚未验收，不能根据 SDK �
 
 每次都还须附加 receipt 中真实的 targetStartAfterCursor，不能猜数值。后续使用 sinceCursor=上次 nextCursor，
 同一轮继续带 targetStartAfterCursor。普通工具事件留在 bridge 内部。
+原生验收通过且 observation.profile 为 adaptive/long 时，把 timeoutSec:30 改为
+schedule:"adaptive",observationPolicy:"supervised"。按本轮年龄 <5/5–10/10–15/≥15 分钟
+分别等待 60/120/180/300 秒；期间持续监听，完成、交互、故障或连续三次已观察工具失败会提前返回。
+queue 新轮重新计时，steer 后两分钟内按 60 秒复核。可显式传更短 timeoutSec 做阶段检查。
+每次到期判断阶段方向，只按需要读取增量 tail，不惯例追加全量 status/history。
+supervision 是问题候选，先看证据再决定指导；成功工具也不保证方向正确。
+用 sinceCursor 确认已检查过的失败；不对相同未解决交互/故障热循环。
+处理过的状态若仍需继续观察，可带 acknowledgedWakeKey=收到的 wakeKey；终态验收后停止 wait。
+dsh_observe 和 delegate 内嵌等待保留 change/full 旧行为；新策略使用独立 dsh_wait。
+
 仅需要阶段性监督时选择 change；需要细节才调用 dsh_tail。
 
 timeout 是正常观察结果，不代表 DSH 失败。继续已授权任务并给有意义的进展，

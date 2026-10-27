@@ -101,7 +101,7 @@ test("P3: long schema accepts 900 terminal only; defaults remain 30 and errors n
     await server.connect(a);await client.connect(b);connection.state.availability="host_unreachable";
     const call=(args:Record<string,unknown>)=>client.callTool({name:"dsh_wait",arguments:{taskId:task.taskId,...args}});
     assert.equal((await call({timeoutSec:900,until:"terminal"})).isError,undefined);
-    assert.equal((await call({timeoutSec:31})).isError,true);assert.equal((await call({timeoutSec:901,until:"terminal"})).isError,true);
+    assert.equal((await call({timeoutSec:31,until:"change"})).isError,true);assert.equal((await call({timeoutSec:901,until:"terminal"})).isError,true);
     assert.equal(service.waitCapabilities().defaults.timeoutSec,30);assert.equal(service.waitCapabilities().clientLongWaitVerified,false);
   }finally{await client.close();await server.close();await rm(home,{recursive:true,force:true});}
 });
