@@ -6,6 +6,19 @@ does not announce an npm publication.
 
 ## Unreleased
 
+- Active Desktop waits now take priority over idle session follows when the
+  24-session observation budget is full. Per-task wait results expose a
+  capacity or stream-retry state rather than silently waiting on an uncovered
+  target; a recovering stream replays missing history.
+- At the wait deadline, a final local read is capped at 150 ms. Its status is
+  marked `snapshotFreshness: refreshed` or `stale`; a newly observed completion
+  remains a timeout, not a claim that it arrived before the deadline.
+- Native Codex short-result delivery, fail-closed stale locks, and Windows
+  test and junction-guard failures remain open (see `KNOWN_ISSUES.md`). The
+  source build and ten observation-coverage tests pass, but the full Windows
+  test run remains red. This source change has not been installed into
+  existing Desktop clients.
+
 ## 0.2.0 — adaptive Desktop observation source (2026-10-27)
 
 - Desktop standalone `dsh_wait` now defaults to terminal/compact with supervised

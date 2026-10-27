@@ -1495,6 +1495,7 @@ export class BridgeService {
         execution = ledger.execution;
       }
       const final = await this.resolveFinalMessage(taskId, isTerminal(execution) ? ledger.finalMessagePointer : undefined, signal);
+      const observation = this.connection.observationForTask?.(taskId);
       return {
         ...statusShape(
           task,
@@ -1508,6 +1509,7 @@ export class BridgeService {
           workspaceClaim,
         ),
         ...final,
+        ...(observation === undefined ? {} : { observation }),
         finalMessageStatus:
           isTerminal(execution) &&
           (ledger.terminalMissingFinal || (execution === "interrupted" && ledger.finalMessagePointer === undefined))
@@ -1621,6 +1623,8 @@ export class BridgeService {
     if (!Number.isInteger(timeoutSec) || timeoutSec < 0 || timeoutSec > max) throw new Error(`timeoutSec must be between 0 and ${max}`);
     if (options.targetStartAfterCursor !== undefined && options.until !== "terminal") throw new Error("targetStartAfterCursor requires explicit until=terminal");
     if ((options.adaptive || options.supervise) && options.until !== "terminal") throw new Error("adaptive/supervised observation requires until=terminal");
+    const releaseObservation = timeoutSec > 0 && this.connection.beginTaskObservation
+      ? this.connection.beginTaskObservation(taskId, (await this.tasks.get(taskId)).sessionId) : () => {};
     let waitSchedule: ReturnType<typeof adaptiveBudget> | undefined;
     const read = async (initial: boolean, signal: AbortSignal) => {
       signal.throwIfAborted();
@@ -1658,16 +1662,22 @@ export class BridgeService {
         waitSchedule = adaptiveBudget(view.turn, Date.now(), evidence?.lastSteerAt);
         waitSchedule.timeoutSec = Math.min(timeoutSec, waitSchedule.timeoutSec);
       }
+      const observation = this.connection.observationForTask?.(taskId);
       return { ...view, observationRevision: this.connection.observationRevisionForTask?.(taskId) ?? view.connection.revision,
+        ...(observation === undefined ? {} : { observation }),
         ...(waitSchedule === undefined ? {} : { waitSchedule }),
         ...(options.supervise && evidence?.issue ? { observationIssue: evidence.issue } : {}),
         ...(start === undefined ? {} : { observedRunStartCursor: start }),
         ...(resultCursor === undefined ? {} : { finalMessageAfterCursor: resultCursor }) };
     };
-    const result = await waitWithPolicy({ timeoutSec, ...(sinceCursor === undefined ? {} : { sinceCursor }), options, read,
-      ...(options.adaptive ? { selectTimeout: () => waitSchedule?.timeoutSec ?? Math.min(timeoutSec, 60) } : {}),
-      wait: (cursor, revision, remaining, signal) => this.connection.waitForTaskChange(taskId, cursor, revision, remaining, signal) });
-    return options.responseMode === "compact" ? compactWait(result) : result;
+    try {
+      const result = await waitWithPolicy({ timeoutSec, ...(sinceCursor === undefined ? {} : { sinceCursor }), options, read,
+        ...(options.adaptive ? { selectTimeout: () => waitSchedule?.timeoutSec ?? Math.min(timeoutSec, 60) } : {}),
+        wait: (cursor, revision, remaining, signal) => this.connection.waitForTaskChange(taskId, cursor, revision, remaining, signal) });
+      return options.responseMode === "compact" ? compactWait(result) : result;
+    } finally {
+      releaseObservation();
+    }
   }
 
   async observe(taskId: string, afterCursor: number | undefined, waitSeconds: number) {

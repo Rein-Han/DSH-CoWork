@@ -1,5 +1,9 @@
 import { DescriptorProblem, type ConnectionGeneration } from "../../desktop/connection-descriptor.js";
-import { resolveConnection } from "../../desktop/connection-resolver.js";
+import {
+  resolveConnection,
+  type ResolveConnectionOptions,
+  type ResolvedConnection,
+} from "../../desktop/connection-resolver.js";
 import type { AuthSession } from "../../desktop/auth-session.js";
 import type { DshApi, DshMuxFrame, DshServerRequest, DshSubagentAddress, DshSubagentListValue } from "../../dsh-types.js";
 import {
@@ -15,6 +19,8 @@ export interface PairedHostAdapterOptions {
   readonly timeoutMs: number;
   /** Set only by tests that do not run the OS-level probes. */
   readonly skipNativeChecks?: boolean;
+  /** Replace the authenticated connection only in tests. */
+  readonly resolve?: (options: ResolveConnectionOptions) => Promise<ResolvedConnection>;
 }
 
 /**
@@ -34,6 +40,9 @@ export class PairedHostAdapter implements HostAdapter {
   private negotiated: { protocolFamily: string; harnessVersion: string; desktopVersion: string } | undefined;
   private connecting: Promise<DesktopPairedAdapter> | undefined;
   private lastProblem: string | undefined;
+  private generationController = new AbortController();
+  private readonly observers = new Map<string, Set<() => void>>();
+  private readonly observerReleases = new Map<string, () => void>();
 
   constructor(private readonly options: PairedHostAdapterOptions) {}
 
@@ -54,6 +63,43 @@ export class PairedHostAdapter implements HostAdapter {
   /** The generation this adapter most recently authenticated, if any. */
   currentGeneration(): ConnectionGeneration | undefined {
     return this.generation;
+  }
+
+  watchSession(sessionId: string, onChange: () => void): () => void {
+    const listeners = this.observers.get(sessionId) ?? new Set<() => void>();
+    listeners.add(onChange);
+    this.observers.set(sessionId, listeners);
+    this.bindObserver(sessionId);
+    return () => {
+      listeners.delete(onChange);
+      if (listeners.size === 0) {
+        this.observers.delete(sessionId);
+        this.observerReleases.get(sessionId)?.();
+        this.observerReleases.delete(sessionId);
+      }
+    };
+  }
+
+  sessionObservation(sessionId: string) {
+    if (!this.observers.has(sessionId)) return undefined;
+    return this.inner?.sessionObservation(sessionId) ?? {
+      state: "retrying" as const,
+      reason: "generation_unavailable",
+    };
+  }
+
+  private bindObserver(sessionId: string): void {
+    if (this.inner === undefined || this.observerReleases.has(sessionId)) return;
+    const release = this.inner.watchSession(sessionId, () => {
+      for (const notify of this.observers.get(sessionId) ?? []) notify();
+    });
+    this.observerReleases.set(sessionId, release);
+  }
+
+  private notifyObservers(): void {
+    for (const listeners of this.observers.values()) {
+      for (const notify of [...listeners]) notify();
+    }
   }
 
   capabilities(): HostCapabilities {
@@ -87,7 +133,7 @@ export class PairedHostAdapter implements HostAdapter {
     if (this.inner !== undefined) return this.inner;
     if (this.connecting !== undefined) return this.connecting;
     const pending = (async () => {
-      const resolved = await resolveConnection({
+      const resolved = await (this.options.resolve ?? resolveConnection)({
         connectionFile: this.options.connectionFile,
         ...(this.generation === undefined ? {} : { previousGeneration: this.generation }),
         ...(this.options.skipNativeChecks === undefined ? {} : { skipNativeChecks: this.options.skipNativeChecks }),
@@ -109,6 +155,8 @@ export class PairedHostAdapter implements HostAdapter {
         harnessVersion: resolved.descriptor.harnessVersion,
         desktopVersion: resolved.descriptor.desktopVersion,
       });
+      for (const sessionId of this.observers.keys()) this.bindObserver(sessionId);
+      this.notifyObservers();
       return this.inner;
     })();
     this.connecting = pending;
@@ -127,9 +175,14 @@ export class PairedHostAdapter implements HostAdapter {
 
   /** Drop the current generation so the next call re-reads the descriptor. */
   private invalidate(): void {
+    this.generationController.abort();
+    this.generationController = new AbortController();
+    for (const release of this.observerReleases.values()) release();
+    this.observerReleases.clear();
     this.inner?.disconnect().catch(() => undefined);
     this.inner = undefined;
     this.session = undefined;
+    this.notifyObservers();
   }
 
   private async run<T>(operation: (adapter: DesktopPairedAdapter) => Promise<T>): Promise<T> {
@@ -231,7 +284,7 @@ export class PairedHostAdapter implements HostAdapter {
       if (signal.aborted) return;
       const adapter = await this.connect();
       try {
-        for await (const frame of adapter.openMux(signal, () => {
+        for await (const frame of adapter.openMux(AbortSignal.any([signal, this.generationController.signal]), () => {
           announced = true;
           onOpen?.();
         })) {
@@ -246,6 +299,7 @@ export class PairedHostAdapter implements HostAdapter {
         throw error;
       }
       if (signal.aborted) return;
+      if (this.inner !== adapter) continue;
       // A mux that completed without cancellation means the generation ended.
       void announced;
       this.invalidate();

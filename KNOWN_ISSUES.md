@@ -1,5 +1,75 @@
 # Known issues
 
+## Open items in the unreleased observation work
+
+### Follow preemption may delay another task's live updates (P2, deferred)
+
+When more than 24 root sessions compete for Desktop `session/follow` slots,
+running sessions rank ahead of idle ones, and an active wait takes priority.
+This can displace another session's follow. That session's completion or
+pending interaction may reach its main agent later,
+after it is followed again or explicitly reconciled by a status read. This
+changes which task bears the observation delay; it does not cancel a DSH task,
+resend a prompt, or establish that conversation content was lost. Defer a
+behavior change for P2; do not claim it is resolved without testing parallel
+tasks through the real Desktop entry point, displacement, recovery, and
+descendant history.
+
+### Native Codex short-result delivery may queue behind a long call
+
+Observed in the native caller: a short task had completed but its result was
+not delivered to the main conversation until a separate long wait returned.
+The SDK timer-only control returned the short result in about three seconds
+while the long call took about 25 seconds. This does not identify which native
+dispatch, collection, or delivery stage is responsible, nor prove the native
+behavior is fixed. Keep extended/adaptive waits opt-in until that client path
+is reproduced and verified with separate send/server-complete/client-receive/
+conversation-resume timestamps. Do not re-dispatch a completed task just to
+work around a missing notification.
+
+### An orphaned fail-closed `events.lock` can block one task
+
+A lock directory remains in this machine's shared bridge home for a different
+task, with an owner PID that was not running when checked. The bridge reported
+`pending baseline reconciliation` lock acquisition timeouts. This may block
+operations touching that task's ledger and warrants controlled local recovery;
+it is not established as the cause of the earlier completion-notification
+delay. Never auto-delete a lock based only on PID/mtime, and do not remove a
+shared bridge home or a broad parent directory. See the crash-recovery section
+below before any manual action.
+
+### Six Windows symlink-security tests are unverified
+
+On this Windows machine, six test fixtures fail with `EPERM` while creating
+symbolic links. The security assertions never execute: this is a verification
+gap, not six demonstrated product defects. Re-run those cases in an environment
+with symlink creation rights; do not silently skip or report them as passing.
+The product source build passes independently. The test runner also emits 16
+pre-existing TypeScript diagnostics in test sources before executing emitted
+JavaScript; a green runtime subset is not a clean test type-check.
+
+### Windows junction parent bypasses the Codex skill installation guard (deferred)
+
+On this machine, the test that creates a junction at the project's `.agents`
+directory reaches `prepareCodexSkillInstall` but does not get the expected
+rejection. Node reports that junction as a directory, not a symbolic link, so
+the parent-directory guard's `isSymbolicLink()` check misses it. A prepared
+installation can therefore target the junction's destination instead of the
+apparent project path. This is a confirmed guard failure, not evidence that a
+user's installation has been redirected. Leave the guard unchanged for now;
+do not count this test as an environment-only failure.
+
+### Other confined-Windows test failures
+
+The October 28, 2026 full run passed 341 of 354 tests, including all ten
+observation-coverage tests. Besides the six symlink fixture failures and the
+junction guard above, two canonical-cwd tests failed while removing a junction
+fixture (`ERR_FS_EISDIR`) before their retargeting assertions; three process
+tests could not spawn child processes (`EPERM`), and a Windows process-facts
+test could not observe the current process in this sandbox. These are
+verification gaps on this runner, not demonstrated product regressions. The
+strict product build passed; `npm run check` exited 1.
+
 ## Shared coordination ledger can fail on a duplicate cursor
 
 Status: fixed in `0.1.0-alpha.2`.

@@ -22,6 +22,8 @@ export interface WaitView {
   connection: { revision: number };
   observationRevision?: number;
   recovery: { state: string };
+  observation?: { state: "pending" | "following" | "capacity" | "retrying"; reason?: string };
+  snapshotFreshness?: "stale" | "refreshed";
   [key: string]: unknown;
 }
 
@@ -29,8 +31,9 @@ const terminal = new Set(["turn_completed", "failed", "canceled", "interrupted"]
 export function meaningfulWake(view: WaitView): string | undefined {
   if (view.availability !== "connected") return "availability";
   if (view.recovery.state !== "reconciled") return "observation_error";
-  if (view.pendingInteractions.length > 0 || view.execution.startsWith("awaiting_")) return "interaction";
   if (terminal.has(view.execution)) return "terminal";
+  if (view.observation?.state === "capacity" || view.observation?.state === "retrying") return "observation_error";
+  if (view.pendingInteractions.length > 0 || view.execution.startsWith("awaiting_")) return "interaction";
   return undefined;
 }
 
@@ -84,6 +87,26 @@ export async function waitWithPolicy<T extends WaitView>(input: {
       controller.signal.removeEventListener("abort", abort);
     }
   };
+  const lastRead = async (): Promise<T | undefined> => {
+    const final = new AbortController();
+    const cancel = () => final.abort(controller.signal.reason);
+    controller.signal.addEventListener("abort", cancel, { once: true });
+    const timer = setTimeout(() => final.abort(new Error("final observation read timed out")), 150);
+    try {
+      return await Promise.race([
+        input.read(false, final.signal),
+        new Promise<undefined>((resolve) => final.signal.addEventListener("abort", () => resolve(undefined), { once: true })),
+      ]);
+    } catch {
+      controller.signal.throwIfAborted();
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+      final.abort();
+      controller.signal.removeEventListener("abort", cancel);
+      controller.signal.throwIfAborted();
+    }
+  };
   try {
     controller.signal.throwIfAborted();
     let view = await bounded(() => input.read(true, controller.signal));
@@ -91,6 +114,13 @@ export async function waitWithPolicy<T extends WaitView>(input: {
     let cursor = input.sinceCursor ?? view.cursor;
     const observationRevision = (v: T) => v.observationRevision ?? v.connection.revision;
     let revision = observationRevision(view);
+    const atDeadline = async () => {
+      const latest = await lastRead();
+      if (latest !== undefined) {
+        return { timedOut: true, wakeReason: "timeout", status: { ...latest, snapshotFreshness: "refreshed" as const }, nextCursor: latest.cursor };
+      }
+      return { timedOut: true, wakeReason: "timeout", status: { ...view, snapshotFreshness: "stale" as const }, nextCursor: view.cursor };
+    };
     for (;;) {
       controller.signal.throwIfAborted();
       const reason = meaningfulWake(view) ?? (input.options.supervise && view.observationIssue ? "supervision" : undefined);
@@ -102,17 +132,17 @@ export async function waitWithPolicy<T extends WaitView>(input: {
         return { timedOut: false, wakeReason: "change", status: view, nextCursor: view.cursor };
       }
       const remaining = deadline - performance.now();
-      if (remaining <= 0) return { timedOut: true, wakeReason: "timeout", status: view, nextCursor: view.cursor };
+      if (remaining <= 0) return await atDeadline();
       cursor = view.cursor;
       revision = observationRevision(view);
       await input.wait(cursor, revision, remaining, controller.signal);
       controller.signal.throwIfAborted();
-      if (performance.now() >= deadline) return { timedOut: true, wakeReason: "timeout", status: view, nextCursor: view.cursor };
+      if (performance.now() >= deadline) return await atDeadline();
       try {
         view = await bounded(() => input.read(false, controller.signal));
       } catch (error) {
         if (error instanceof Error && "code" in error && error.code === "observation_timeout") {
-          return { timedOut: true, wakeReason: "timeout", status: view, nextCursor: view.cursor };
+          return await atDeadline();
         }
         throw error;
       }
@@ -138,6 +168,8 @@ export function compactWait(result: { timedOut: boolean; wakeReason: string; sta
     finalMessageStatus: s.finalMessageStatus,
     contentUnavailable: s.contentUnavailable,
     recovery: s.recovery, queueDepth: s.queueDepth,
+    ...(s.observation === undefined ? {} : { observation: s.observation }),
+    ...(s.snapshotFreshness === undefined ? {} : { snapshotFreshness: s.snapshotFreshness }),
     ...(s.observedRunStartCursor === undefined ? {} : { observedRunStartCursor: s.observedRunStartCursor }),
     ...(result.wakeKey === undefined ? {} : { wakeKey: result.wakeKey }),
     ...(s.waitSchedule === undefined ? {} : { waitSchedule: s.waitSchedule }),
@@ -180,6 +212,6 @@ import { createHash } from "node:crypto";
 function observationWakeKey(view: WaitView, reason: string): string {
   const identity = reason === "supervision" ? view.observationIssue :
     reason === "interaction" ? view.pendingInteractions.map(interactionSummary) :
-    { availability: view.availability, recovery: view.recovery.state };
+    { availability: view.availability, recovery: view.recovery.state, observation: view.observation };
   return createHash("sha256").update(JSON.stringify([view.taskId, reason, identity])).digest("hex").slice(0, 24);
 }

@@ -186,7 +186,7 @@ npm test
 
 - 插件源码在 `packages/desktop-connector/`，打包命令：`npm pack ./packages/desktop-connector --pack-destination ./release`。
 - 安装包脚本在 `installer/`，需要 Inno Setup 6，执行 `installer\build.ps1`。脚本从 `release/` 取文件，产物输出到 `release/`（exe 不提交进仓库）。
-- 当前 Windows 机器上有 6 个安全测试因无法创建符号链接而在夹具准备阶段失败（`EPERM`）；正常用户权限复跑仍如此。这些测试尚未验证通过，不能断定对应防护功能已合格。原生 Codex 短结果交付可能排队、完成状态偶发延迟仍待定位；SDK 测试不能替代原生客户端验收。
+- 当前 Windows 机器上的全量测试为 341/354 通过：6 项无法创建符号链接，另有夹具或沙箱限制，以及 1 项已确认的 junction 安装防护缺口（暂缓修复）。未发布源码已修复一条可复现的完成通知漏订阅路径，相关 10 项测试通过；原生 Codex 短结果交付仍可能排队，修复尚未经过更新后客户端的验收。详见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。
 
 ## 来源
 

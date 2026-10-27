@@ -460,6 +460,8 @@ export interface DshDesktopWorkspace {
 }
 
 export interface DshApi {
+  watchSession?(sessionId: string, onChange: () => void): () => void;
+  sessionObservation?(sessionId: string): { state: "pending" | "following" | "capacity" | "retrying"; reason?: string } | undefined;
   sessionWorkspaceState?(sessionId: string, signal?: AbortSignal): Promise<DshWorkspaceState>;
   hostDescribe(signal?: AbortSignal): Promise<DshUnaryResult<DshHostDescription>>;
   sessionList(signal?: AbortSignal): Promise<DshUnaryResult<z.infer<typeof dshSessionListValueSchema>>>;

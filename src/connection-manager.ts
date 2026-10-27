@@ -91,6 +91,8 @@ export interface DshConnection {
   queueForSession(sessionId: string): QueueSnapshot;
   jobsForSession?(sessionId: string): { known: boolean; active: boolean };
   observationRevisionForTask?(taskId: string): number;
+  beginTaskObservation?(taskId: string, sessionId: string): () => void;
+  observationForTask?(taskId: string): ReturnType<NonNullable<DshApi["sessionObservation"]>>;
   waitForTaskChange(taskId: string, afterCursor: number, afterRevision: number, waitMs: number, signal?: AbortSignal): Promise<TaskChangeResult>;
   answerQuestion(taskId: string, requestId: string, answers: DshQuestionAnswer[]): Promise<unknown>;
   resolveApproval(taskId: string, requestId: string, outcome: "allow_once" | "reject"): Promise<unknown>;
@@ -437,6 +439,15 @@ export class DshConnectionManager implements DshConnection {
 
   observationRevisionForTask(taskId: string): number {
     return Math.max(this.taskObservationRevisions.get(taskId) ?? 0, this.availabilityObservationRevision);
+  }
+
+  beginTaskObservation(taskId: string, sessionId: string): () => void {
+    return this.api.watchSession?.(sessionId, () => this.bumpRevision(taskId)) ?? (() => {});
+  }
+
+  observationForTask(taskId: string) {
+    const sessionId = this.tasksById.get(taskId)?.sessionId;
+    return sessionId === undefined ? undefined : this.api.sessionObservation?.(sessionId);
   }
 
   async waitForTaskChange(

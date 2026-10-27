@@ -1,7 +1,10 @@
 # Adaptive Desktop observation (policy version 3)
 
 Baseline: local tag `v0.1.1`, commit `bef97104f60405931b7a183b2ebc09700475f5ce`.
-This change is restricted to observation, summaries, wait configuration and TOML editing.
+This section describes the tagged `v0.2.0` observation change. The later,
+unreleased follow-coverage fix also changes the Desktop Host adapter, so the
+`v0.1.1` observation-boundary check does not apply to that later patch.
+The tagged change is restricted to observation, summaries, wait configuration and TOML editing.
 Task dispatch, workspace ownership, prompt routing, queue/steer sending, target-run
 attribution, Host adapters, cancellation and release guards retain their baseline code.
 Check this boundary with `node scripts/check-observation-boundary.mjs`.

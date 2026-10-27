@@ -168,6 +168,11 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
   /** requestId used for the most recent dispatch per session, for honest recovery. */
   private readonly lastPromptRequestIds = new Map<string, string>();
   private readonly subscriptions = new Map<string, AbortController>();
+  private readonly following = new Set<string>();
+  private readonly observers = new Map<string, Set<() => void>>();
+  private readonly observationStates = new Map<string, { state: "pending" | "following" | "capacity" | "retrying"; reason?: string }>();
+  private readonly retryAfter = new Map<string, number>();
+  private requestDiscovery: (() => void) | undefined;
 
   constructor(private readonly options: DesktopPairedAdapterOptions) {
     this.protocolFamily = options.protocolFamily;
@@ -534,6 +539,36 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
     return this.mux(signal, onOpen);
   }
 
+  watchSession(sessionId: string, onChange: () => void): () => void {
+    const listeners = this.observers.get(sessionId) ?? new Set<() => void>();
+    listeners.add(onChange);
+    this.observers.set(sessionId, listeners);
+    if (!this.observationStates.has(sessionId)) {
+      this.observationStates.set(sessionId, { state: this.following.has(sessionId) ? "following" : "pending" });
+    }
+    this.requestDiscovery?.();
+    return () => {
+      listeners.delete(onChange);
+      if (listeners.size === 0) {
+        this.observers.delete(sessionId);
+        this.observationStates.delete(sessionId);
+        this.requestDiscovery?.();
+      }
+    };
+  }
+
+  sessionObservation(sessionId: string) {
+    return this.observationStates.get(sessionId);
+  }
+
+  private updateObservation(sessionId: string, state: "pending" | "following" | "capacity" | "retrying", reason?: string): void {
+    if (!this.observers.has(sessionId)) return;
+    const previous = this.observationStates.get(sessionId);
+    if (previous?.state === state && previous.reason === reason) return;
+    this.observationStates.set(sessionId, { state, ...(reason === undefined ? {} : { reason }) });
+    for (const notify of this.observers.get(sessionId) ?? []) notify();
+  }
+
   private async *mux(
     signal: AbortSignal,
     onOpen?: () => void,
@@ -541,6 +576,8 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
     this.requireCapability("follow", "following sessions");
     const queue: DshServerRequest<DshMuxFrame>[] = [];
     let wake: (() => void) | undefined;
+    let discoveryRequested = false;
+    this.requestDiscovery = () => { discoveryRequested = true; wake?.(); };
     let announced = false;
     const push = (frame: DshMuxFrame) => {
       queue.push({ type: "server-request", rpcId: randomUUID(), method: frame.type, payload: frame });
@@ -552,10 +589,12 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
       }
     };
     const pump = (sessionId: string) => {
-      if (this.subscriptions.has(sessionId) || this.subscriptions.size >= MAX_FOLLOWED_SESSIONS) return;
+      if (this.subscriptions.has(sessionId) || this.subscriptions.size >= MAX_FOLLOWED_SESSIONS || (this.retryAfter.get(sessionId) ?? 0) > Date.now()) return;
       const controller = new AbortController();
       this.subscriptions.set(sessionId, controller);
+      this.updateObservation(sessionId, "pending");
       void (async () => {
+        let failure = "stream_ended";
         try {
           for await (const frame of this.options.session.openStream(
             ENDPOINTS.sessionFollow,
@@ -564,36 +603,63 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
           )) {
             if (frame.type !== "item") continue;
             const parsed = sessionFollowFrameSchema.safeParse(frame.value);
-            if (!parsed.success) continue;
+            if (!parsed.success) throw Object.assign(new Error("invalid session/follow frame"), { code: "invalid_follow_frame" });
             if (parsed.data.type === "snapshot") {
+              this.retryAfter.delete(sessionId);
+              this.following.add(sessionId);
+              this.updateObservation(sessionId, "following");
               push({ type: "session/subscribed", sessionId, lastSeq: parsed.data.cursor });
               for (const record of parsed.data.records) pushEvent(push, sessionId, record.event);
             } else if (parsed.data.type === "event") {
               pushEvent(push, sessionId, parsed.data.event);
             }
           }
-        } catch {
-          // A per-session stream failure is not a mux failure.
+        } catch (error) {
+          failure = error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : "stream_failed";
         } finally {
-          this.subscriptions.delete(sessionId);
+          if (this.subscriptions.get(sessionId) === controller) {
+            this.subscriptions.delete(sessionId);
+            this.following.delete(sessionId);
+            if (!signal.aborted && !controller.signal.aborted) {
+              this.retryAfter.set(sessionId, Date.now() + this.discoveryIntervalMs);
+              this.updateObservation(sessionId, "retrying", failure);
+            }
+          }
         }
       })();
     };
 
     try {
       while (!signal.aborted) {
+        discoveryRequested = false;
         try {
           const list = await this.sessionList(signal);
           const candidates = list.items
             .filter((item) => item.blank !== true && item.origin !== "subagent")
-            .sort((left, right) => right.updatedAt - left.updatedAt);
-          for (const item of candidates) pump(item.sessionId);
+            .sort((left, right) => Number(this.observers.has(right.sessionId)) - Number(this.observers.has(left.sessionId)) ||
+              Number(right.running) - Number(left.running) || right.updatedAt - left.updatedAt);
+          const now = Date.now();
+          const eligible = candidates.filter((item) => (this.retryAfter.get(item.sessionId) ?? 0) <= now);
+          const selected = new Set(eligible.slice(0, MAX_FOLLOWED_SESSIONS).map((item) => item.sessionId));
+          for (const [sessionId, controller] of this.subscriptions) {
+            if (!selected.has(sessionId)) {
+              this.subscriptions.delete(sessionId);
+              this.following.delete(sessionId);
+              controller.abort();
+            }
+          }
+          for (const item of eligible) {
+            if (selected.has(item.sessionId)) pump(item.sessionId);
+            else this.updateObservation(item.sessionId, "capacity", "follow_limit");
+          }
         } catch {
-          // Keep the mux alive; the bridge reports availability separately.
+          for (const sessionId of this.observers.keys()) {
+            if (!this.following.has(sessionId)) this.updateObservation(sessionId, "retrying", "discovery_failed");
+          }
         }
         const deadline = Date.now() + this.discoveryIntervalMs;
         while (!signal.aborted) {
-          if (queue.length > 0) break;
+          if (queue.length > 0 || discoveryRequested) break;
           const remaining = deadline - Date.now();
           if (remaining <= 0) break;
           await new Promise<void>((resolve) => {
@@ -607,8 +673,14 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
         }
       }
     } finally {
+      this.requestDiscovery = undefined;
       for (const controller of this.subscriptions.values()) controller.abort();
       this.subscriptions.clear();
+      this.following.clear();
+      this.retryAfter.clear();
+      if (!signal.aborted) {
+        for (const sessionId of this.observers.keys()) this.updateObservation(sessionId, "retrying", "mux_closed");
+      }
     }
   }
 
@@ -616,6 +688,7 @@ export class DesktopPairedAdapter implements HostAdapter, DshApi {
     this.closed = true;
     for (const controller of this.subscriptions.values()) controller.abort();
     this.subscriptions.clear();
+    this.following.clear();
     this.options.session.dispose();
   }
 }
