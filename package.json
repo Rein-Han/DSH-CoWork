@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-cowork",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Private local bridge for Codex, Claude Code, ZCode and Kimi Code to use the running DeepSeek Harness Desktop. Derived from Codex-DSH-Orchestrator / dsh-Agentlink.",
   "license": "MIT",

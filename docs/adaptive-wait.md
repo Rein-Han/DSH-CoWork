@@ -1,8 +1,8 @@
 # Adaptive Desktop observation (policy version 3)
 
 Baseline: local tag `v0.1.1`, commit `bef97104f60405931b7a183b2ebc09700475f5ce`.
-This section describes the tagged `v0.2.0` observation change. The later,
-unreleased follow-coverage fix also changes the Desktop Host adapter, so the
+This section describes the tagged `v0.2.0` observation change. The subsequent
+`v0.2.1` follow-coverage fix also changes the Desktop Host adapter, so the
 `v0.1.1` observation-boundary check does not apply to that later patch.
 The tagged change is restricted to observation, summaries, wait configuration and TOML editing.
 Task dispatch, workspace ownership, prompt routing, queue/steer sending, target-run

@@ -1,6 +1,6 @@
 # Known issues
 
-## Open items in the unreleased observation work
+## Open items after the 0.2.1 observation work
 
 ### Follow preemption may delay another task's live updates (P2, deferred)
 

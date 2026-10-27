@@ -2,7 +2,7 @@
 
 让 Codex / Claude Code / ZCode / Kimi Code，以及具备用户 MCP 设置入口的 Kimi Work，把任务交给你电脑上已经打开的 **DeepSeek Harness Desktop**（下文简称 DSH），然后查看进度、拿回结果、自己验收。
 
-当前源码整合了 P1–P3 修复、ZCode 接入与新会话项目归属，并新增 Kimi 接入和自适应观察。见 [ZCode 指南](docs/zcode.md)、[Kimi Code / Kimi Work 指南](docs/kimi.md) 和 [自适应等待说明](docs/adaptive-wait.md)。现有 exe 安装包仍是旧构建；`v0.2.0` 是源码标签，不是已经更新的安装包。
+当前源码整合了 P1–P3 修复、ZCode 接入与新会话项目归属，并新增 Kimi 接入和自适应观察。见 [ZCode 指南](docs/zcode.md)、[Kimi Code / Kimi Work 指南](docs/kimi.md) 和 [自适应等待说明](docs/adaptive-wait.md)。现有 exe 安装包仍是旧构建；`v0.2.1` 是源码标签，不是已经更新的安装包。
 
 在调用方里说一句“把这个交给 DSH”，它会在 DSH Desktop 里新建一个会话执行任务。你可以在 DSH Desktop 里看到同一个会话和它的每一步操作，做完后由调用方检查改动和测试。
 
@@ -27,7 +27,7 @@ terminal 等待、取消观察隔离、限频进度、增量账本与共享检�
 
 ### 方式一：已有的旧版安装包
 
-当前 exe 不是 `v0.2.0` 源码构建。需要本标签的新功能时，使用下方的源码安装步骤；不要将旧 exe 的验收结果视为这个标签的验收。
+当前 exe 不是 `v0.2.1` 源码构建。需要本标签的新功能时，使用下方的源码安装步骤；不要将旧 exe 的验收结果视为这个标签的验收。
 
 1. 从本仓库的 Releases 页面下载 `DSH-Desktop-Cowork-Setup-<版本>.exe`。安装包没有数字签名，Windows 可能弹出 SmartScreen 提示，选"更多信息 → 仍要运行"。
 2. 在托盘图标上右键退出 DeepSeek Harness Desktop（只关窗口不够）。
@@ -186,7 +186,7 @@ npm test
 
 - 插件源码在 `packages/desktop-connector/`，打包命令：`npm pack ./packages/desktop-connector --pack-destination ./release`。
 - 安装包脚本在 `installer/`，需要 Inno Setup 6，执行 `installer\build.ps1`。脚本从 `release/` 取文件，产物输出到 `release/`（exe 不提交进仓库）。
-- 当前 Windows 机器上的全量测试为 341/354 通过：6 项无法创建符号链接，另有夹具或沙箱限制，以及 1 项已确认的 junction 安装防护缺口（暂缓修复）。未发布源码已修复一条可复现的完成通知漏订阅路径，相关 10 项测试通过；原生 Codex 短结果交付仍可能排队，修复尚未经过更新后客户端的验收。详见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。
+- 当前 Windows 机器上的全量测试为 341/354 通过：6 项无法创建符号链接，另有夹具或沙箱限制，以及 1 项已确认的 junction 安装防护缺口（暂缓修复）。`v0.2.1` 源码已修复一条可复现的完成通知漏订阅路径，相关 10 项测试通过；原生 Codex 短结果交付仍可能排队，修复尚未经过更新后客户端的验收。详见 [KNOWN_ISSUES.md](KNOWN_ISSUES.md)。
 
 ## 来源
 

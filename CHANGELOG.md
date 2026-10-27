@@ -6,6 +6,8 @@ does not announce an npm publication.
 
 ## Unreleased
 
+## 0.2.1 — Desktop follow coverage (2026-10-28)
+
 - Active Desktop waits now take priority over idle session follows when the
   24-session observation budget is full. Per-task wait results expose a
   capacity or stream-retry state rather than silently waiting on an uncovered
